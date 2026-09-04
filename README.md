@@ -40,3 +40,15 @@ FAB and MultiFab data.
 
 The User Guide is also bundled in the application under **Help > User
 Guide...** for offline use.
+
+## Installation on Perlmutter
+```
+cmake --preset default \
+    -DAMREXPLORER_BUILD_TESTS=OFF \
+    -DAMREXPLORER_ENABLE_QT=OFF \
+    -DCMAKE_C_COMPILER=$(which gcc) \
+    -DCMAKE_CXX_COMPILER=$(which g++)
+```
+```
+cmake --build --preset default --parallel 4
+```
