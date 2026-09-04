@@ -20,7 +20,6 @@ LDFLAGS = -L../build/src/cache \
           -L../build/src/remote \
           -L../build/src/render2d \
           -L../build/src/render3d \
-          -L../build/_deps/flatbuffers-build
 
 # Libraries - Order matters for static libraries
 # We list libraries in reverse dependency order (highest level first)
@@ -29,12 +28,10 @@ LIBS = -lamrexplorer_data \
        -lamrexplorer_render2d \
        -lamrexplorer_render3d \
        -lamrexplorer_query \
-       -lamrexplorer_remote \
        -lamrexplorer_io \
        -lamrexplorer_expression \
        -lamrexplorer_core \
        -lamrexplorer_cache \
-       -lflatbuffers \
        -lpthread -ldl
 
 # Default rule
