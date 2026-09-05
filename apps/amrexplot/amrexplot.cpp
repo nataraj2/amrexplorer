@@ -9,6 +9,7 @@
 #include <fstream>
 #include <cmath>
 #include <string>
+#include <algorithm>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
@@ -17,11 +18,7 @@ namespace fs = std::filesystem;
 
 void processPlotfile(const std::string& plotfilePath, const fs::path& outputDir) {
     fs::path inputPath(plotfilePath);
-    
-    // Extract the filename without the extension (e.g., "plt00001.plt" -> "plt00001")
     std::string stem = inputPath.stem().string();
-    // If the filename doesn't have an extension, stem() is the filename.
-    // We then append .png.
     std::string outputFilename = (outputDir / (stem + ".png")).string();
 
     try {
@@ -52,7 +49,7 @@ void processPlotfile(const std::string& plotfilePath, const fs::path& outputDir)
         request.dataset = session.id();
         request.field = fieldId;
         request.normalDirection = 2; 
-        request.physicalPosition = 1.0;
+        request.physicalPosition = 0.0;
         request.outputSize = {outW, outH};
         request.visibleRegion = meta.physicalDomain;
         request.sampling = amrvis::SamplingPolicy::Linear;
@@ -91,8 +88,24 @@ void processPlotfile(const std::string& plotfilePath, const fs::path& outputDir)
             
             amrvis::ImageBuffer img = amrvis::renderScalarPlane(plane, settings);
 
-            if (stbi_write_png(outputFilename.c_str(), img.width, img.height, 4, img.rgba.data(), img.width * 4)) {
-                std::cout << "Saved: " << outputFilename << " (" << img.width << "x" << img.height << ")\n";
+            // FLIP ONLY Y-AXIS:
+            // Data origin is bottom-left, PNG is top-left.
+            int w = img.width;
+            int h = img.height;
+            std::vector<uint32_t> flippedRgba(w * h);
+            
+            for (int y = 0; y < h; ++y) {
+                for (int x = 0; x < w; ++x) {
+                    // Correct the Y-axis (vertical flip)
+                    // Keep X as it is (no horizontal flip)
+                    flippedRgba[y * w + x] = img.rgba[(h - 1 - y) * w + x];
+                }
+            }
+
+            if (stbi_write_png(outputFilename.c_str(), w, h, 4, 
+                               reinterpret_cast<const unsigned char*>(flippedRgba.data()), 
+                               w * 4)) {
+                std::cout << "Saved: " << outputFilename << " (" << w << "x" << h << ")\n";
             } else {
                 std::cerr << "Failed to save PNG: " << outputFilename << "\n";
             }
