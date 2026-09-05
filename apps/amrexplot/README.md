@@ -9,7 +9,7 @@
 - **Clean Naming**: Saves images using the plotfile's base name (e.g., `plt0001` $\rightarrow$ `plt0001.png`).
 
 ## Prerequisites
-The tool depends on the `amrexplorer` library and the `stb_image_write` header for PNG encoding.
+The tool depends on the `amrexplorer` library which should be compiled first. See documentation for instructions.
 
 ## Usage
 
@@ -17,6 +17,7 @@ The tool depends on the `amrexplorer` library and the `stb_image_write` header f
 Run the executable and provide a text file containing the paths to the plotfiles you wish to process:
 
 ```bash
+make -j4
 ./amrexplot <filelist.txt>
 ```
 
