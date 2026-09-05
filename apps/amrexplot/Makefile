@@ -1,25 +1,25 @@
 # Compiler and flags
 CXX = g++
-CXXFLAGS = -std=c++20 -O3 -Wall -I../include -I../build/_deps/flatbuffers-src/include
+CXXFLAGS = -std=c++20 -O3 -Wall -I../../include -I../../build/_deps/flatbuffers-src/include
 
 # Target executable
-TARGET = slice_to_png
+TARGET = amrexplot.exe
 
 # Source file
-SRCS = slice_to_png.cpp
+SRCS = amrexplot.cpp
 OBJS = $(SRCS:.cpp=.o)
 
 # Library paths
-LDFLAGS = -L../build/src/cache \
-          -L../build/src/core \
-          -L../build/src/data \
-          -L../build/src/expression \
-          -L../build/src/io \
-          -L../build/src/pipeline \
-          -L../build/src/query \
-          -L../build/src/remote \
-          -L../build/src/render2d \
-          -L../build/src/render3d \
+LDFLAGS = -L../../build/src/cache \
+          -L../../build/src/core \
+          -L../../build/src/data \
+          -L../../build/src/expression \
+          -L../../build/src/io \
+          -L../../build/src/pipeline \
+          -L../../build/src/query \
+          -L../../build/src/remote \
+          -L../../build/src/render2d \
+          -L../../build/src/render3d \
 
 # Libraries - Order matters for static libraries
 # We list libraries in reverse dependency order (highest level first)
