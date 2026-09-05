@@ -1,6 +1,6 @@
 # amrexplot
 
-`amrexplot` is intended as a tool that can be extended to load the state from a given plotfile and generate images automatically without opening the GUI. Currently, it provides a programmatic way to extract and render slices from AMReX plotfiles.
+`amrexplot` is intended as a tool that can be extended to load a saved state onto a list of plotfiles and generate images automatically without opening the GUI. Currently, it provides a programmatic way to extract and render slices from AMReX plotfiles.
 
 ## Features
 - **Batch Processing**: Reads a list of plotfiles from a text file and processes them sequentially.
