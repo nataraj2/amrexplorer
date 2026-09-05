@@ -7,18 +7,22 @@
 #include <filesystem>
 #include <vector>
 #include <fstream>
+#include <cmath>
+#include <string>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
-int main(int argc, char** argv) {
-    if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <plotfile_path>\n";
-        return 1;
-    }
+namespace fs = std::filesystem;
 
-    std::filesystem::path plotfilePath = argv[1];
-    std::string outputFilename = "slice_z0.png";
+void processPlotfile(const std::string& plotfilePath, const fs::path& outputDir) {
+    fs::path inputPath(plotfilePath);
+    
+    // Extract the filename without the extension (e.g., "plt00001.plt" -> "plt00001")
+    std::string stem = inputPath.stem().string();
+    // If the filename doesn't have an extension, stem() is the filename.
+    // We then append .png.
+    std::string outputFilename = (outputDir / (stem + ".png")).string();
 
     try {
         uint64_t cacheBudget = 1024 * 1024 * 1024; 
@@ -27,16 +31,29 @@ int main(int argc, char** argv) {
         amrvis::FieldId fieldId{0};
         const auto& meta = session.metadata();
         if (meta.fields.empty()) {
-            std::cerr << "No fields found in plotfile\n";
-            return 1;
+            std::cerr << "No fields found in plotfile: " << plotfilePath << "\n";
+            return;
         }
         
+        double dx = meta.physicalDomain.upper[0] - meta.physicalDomain.lower[0];
+        double dy = meta.physicalDomain.upper[1] - meta.physicalDomain.lower[1];
+        
+        int baseRes = 512;
+        int outW = baseRes;
+        int outH = baseRes;
+        
+        if (dx > dy) {
+            outH = std::max(1, (int)(baseRes * (dy / dx)));
+        } else if (dy > dx) {
+            outW = std::max(1, (int)(baseRes * (dx / dy)));
+        }
+
         amrvis::SliceRequest request;
         request.dataset = session.id();
         request.field = fieldId;
         request.normalDirection = 2; 
-        request.physicalPosition = 0.0;
-        request.outputSize = {512, 512};
+        request.physicalPosition = 1.0;
+        request.outputSize = {outW, outH};
         request.visibleRegion = meta.physicalDomain;
         request.sampling = amrvis::SamplingPolicy::Linear;
         request.composition = amrvis::CompositionPolicy::FinestAvailable;
@@ -60,8 +77,8 @@ int main(int argc, char** argv) {
             }
 
             if (!hasValid) {
-                std::cerr << "No valid data in slice\n";
-                return 1;
+                std::cerr << "No valid data in slice: " << plotfilePath << "\n";
+                return;
             }
 
             amrvis::ScalarRenderSettings settings;
@@ -74,21 +91,55 @@ int main(int argc, char** argv) {
             
             amrvis::ImageBuffer img = amrvis::renderScalarPlane(plane, settings);
 
-            // Save using stb_image_write
-            // img.rgba contains uint32_t (RGBA), which is exactly what stbi_write_png expects
             if (stbi_write_png(outputFilename.c_str(), img.width, img.height, 4, img.rgba.data(), img.width * 4)) {
-                std::cout << "Slice saved to " << outputFilename << "\n";
+                std::cout << "Saved: " << outputFilename << " (" << img.width << "x" << img.height << ")\n";
             } else {
-                std::cerr << "Failed to save PNG to " << outputFilename << "\n";
-                return 1;
+                std::cerr << "Failed to save PNG: " << outputFilename << "\n";
             }
         } else {
-            std::cerr << "Failed to get slice result\n";
-            return 1;
+            std::cerr << "Failed to get slice result for: " << plotfilePath << "\n";
         }
     } catch (const std::exception& e) {
-        std::cerr << "Error: " << e.what() << "\n";
+        std::cerr << "Error processing " << plotfilePath << ": " << e.what() << "\n";
+    }
+}
+
+int main(int argc, char** argv) {
+    if (argc < 2) {
+        std::cerr << "Usage: " << argv[0] << " <filelist.txt>\n";
         return 1;
+    }
+
+    std::string listFilePath = argv[1];
+    std::ifstream fileList(listFilePath);
+    if (!fileList.is_open()) {
+        std::cerr << "Could not open file list: " << listFilePath << "\n";
+        return 1;
+    }
+
+    fs::path outputDir = "images";
+    try {
+        if (!fs::exists(outputDir)) {
+            fs::create_directory(outputDir);
+            std::cout << "Created directory: " << outputDir << "\n";
+        }
+    } catch (const fs::filesystem_error& e) {
+        std::cerr << "Error creating directory: " << e.what() << "\n";
+        return 1;
+    }
+
+    std::string line;
+    std::vector<std::string> plotfiles;
+    while (std::getline(fileList, line)) {
+        if (!line.empty()) {
+            plotfiles.push_back(line);
+        }
+    }
+
+    std::cout << "Found " << plotfiles.size() << " plotfiles in list.\n";
+    for (const auto& plotfile : plotfiles) {
+        std::cout << "Processing: " << plotfile << "...\n";
+        processPlotfile(plotfile, outputDir);
     }
 
     return 0;
