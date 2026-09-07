@@ -1,0 +1,13 @@
+/pscratch/sd/n/nataraj2/DanMartinLDRDFY27/amrex/Tutorials/amrex-tutorials/ExampleCodes/Amr/Advection_AmrCore/Exec/plt00000
+/pscratch/sd/n/nataraj2/DanMartinLDRDFY27/amrex/Tutorials/amrex-tutorials/ExampleCodes/Amr/Advection_AmrCore/Exec/plt00010
+/pscratch/sd/n/nataraj2/DanMartinLDRDFY27/amrex/Tutorials/amrex-tutorials/ExampleCodes/Amr/Advection_AmrCore/Exec/plt00020
+/pscratch/sd/n/nataraj2/DanMartinLDRDFY27/amrex/Tutorials/amrex-tutorials/ExampleCodes/Amr/Advection_AmrCore/Exec/plt00030
+/pscratch/sd/n/nataraj2/DanMartinLDRDFY27/amrex/Tutorials/amrex-tutorials/ExampleCodes/Amr/Advection_AmrCore/Exec/plt00040
+/pscratch/sd/n/nataraj2/DanMartinLDRDFY27/amrex/Tutorials/amrex-tutorials/ExampleCodes/Amr/Advection_AmrCore/Exec/plt00050
+/pscratch/sd/n/nataraj2/DanMartinLDRDFY27/amrex/Tutorials/amrex-tutorials/ExampleCodes/Amr/Advection_AmrCore/Exec/plt00060
+/pscratch/sd/n/nataraj2/DanMartinLDRDFY27/amrex/Tutorials/amrex-tutorials/ExampleCodes/Amr/Advection_AmrCore/Exec/plt00070
+/pscratch/sd/n/nataraj2/DanMartinLDRDFY27/amrex/Tutorials/amrex-tutorials/ExampleCodes/Amr/Advection_AmrCore/Exec/plt00080
+/pscratch/sd/n/nataraj2/DanMartinLDRDFY27/amrex/Tutorials/amrex-tutorials/ExampleCodes/Amr/Advection_AmrCore/Exec/plt00090
+/pscratch/sd/n/nataraj2/DanMartinLDRDFY27/amrex/Tutorials/amrex-tutorials/ExampleCodes/Amr/Advection_AmrCore/Exec/plt00100
+/pscratch/sd/n/nataraj2/DanMartinLDRDFY27/amrex/Tutorials/amrex-tutorials/ExampleCodes/Amr/Advection_AmrCore/Exec/plt00110
+/pscratch/sd/n/nataraj2/DanMartinLDRDFY27/amrex/Tutorials/amrex-tutorials/ExampleCodes/Amr/Advection_AmrCore/Exec/plt00120

@@ -22,7 +22,7 @@ void processPlotfile(const std::string& plotfilePath, const fs::path& outputDir)
     std::string outputFilename = (outputDir / (stem + ".png")).string();
 
     try {
-        uint64_t cacheBudget = 1024 * 1024 * 1024; 
+        uint64_t cacheBudget = 1024 * 1024 * 1024;
         amrvis::LocalDatasetSession session(plotfilePath, amrvis::DatasetId{1}, cacheBudget, amrvis::StopToken{});
 
         amrvis::FieldId fieldId{0};
@@ -31,14 +31,14 @@ void processPlotfile(const std::string& plotfilePath, const fs::path& outputDir)
             std::cerr << "No fields found in plotfile: " << plotfilePath << "\n";
             return;
         }
-        
+
         double dx = meta.physicalDomain.upper[0] - meta.physicalDomain.lower[0];
         double dy = meta.physicalDomain.upper[1] - meta.physicalDomain.lower[1];
-        
+
         int baseRes = 512;
         int outW = baseRes;
         int outH = baseRes;
-        
+
         if (dx > dy) {
             outH = std::max(1, (int)(baseRes * (dy / dx)));
         } else if (dy > dx) {
@@ -48,7 +48,7 @@ void processPlotfile(const std::string& plotfilePath, const fs::path& outputDir)
         amrvis::SliceRequest request;
         request.dataset = session.id();
         request.field = fieldId;
-        request.normalDirection = 2; 
+        request.normalDirection = 2;
         request.physicalPosition = 0.0;
         request.outputSize = {outW, outH};
         request.visibleRegion = meta.physicalDomain;
@@ -85,7 +85,7 @@ void processPlotfile(const std::string& plotfilePath, const fs::path& outputDir)
                 settings.minimum = minVal - 1.0;
                 settings.maximum = maxVal + 1.0;
             }
-            
+
             amrvis::ImageBuffer img = amrvis::renderScalarPlane(plane, settings);
 
             // FLIP ONLY Y-AXIS:
@@ -93,7 +93,7 @@ void processPlotfile(const std::string& plotfilePath, const fs::path& outputDir)
             int w = img.width;
             int h = img.height;
             std::vector<uint32_t> flippedRgba(w * h);
-            
+
             for (int y = 0; y < h; ++y) {
                 for (int x = 0; x < w; ++x) {
                     // Correct the Y-axis (vertical flip)
@@ -102,8 +102,8 @@ void processPlotfile(const std::string& plotfilePath, const fs::path& outputDir)
                 }
             }
 
-            if (stbi_write_png(outputFilename.c_str(), w, h, 4, 
-                               reinterpret_cast<const unsigned char*>(flippedRgba.data()), 
+            if (stbi_write_png(outputFilename.c_str(), w, h, 4,
+                               reinterpret_cast<const unsigned char*>(flippedRgba.data()),
                                w * 4)) {
                 std::cout << "Saved: " << outputFilename << " (" << w << "x" << h << ")\n";
             } else {
