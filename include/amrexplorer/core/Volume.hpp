@@ -43,8 +43,11 @@ inline constexpr std::size_t maxVolumeTransferEntries = 1024;
 inline constexpr int maxVolumeSamplesPerVoxel = 8;
 inline constexpr double minVolumeZoom = 0.01;
 inline constexpr double maxVolumeZoom = 100.0;
-// The sampled grid's voxel budget: the default (256^3, 64 MiB of floats) and
-// the cap either side enforces (512^3).
+// The sampled grid's voxel budget: the default (256^3, 128 MiB of doubles)
+// and the cap either side enforces (512^3). These count voxels, not bytes,
+// because they are a resolution contract a client sends and the server
+// validates against -- lowering them to hold memory constant would start
+// refusing requests that used to render.
 inline constexpr std::uint64_t defaultVolumeVoxelBudget
     = 256ULL * 256ULL * 256ULL;
 inline constexpr std::uint64_t maxVolumeVoxelBudget = 512ULL * 512ULL * 512ULL;
@@ -54,12 +57,12 @@ inline constexpr std::uint64_t maxVolumeVoxelBudget = 512ULL * 512ULL * 512ULL;
 // takes the budget the dataset was opened with. This is for whoever chooses
 // that number, and it sits here so all three volume budgets read together.
 inline constexpr std::uint64_t defaultVolumeGridCacheBytes
-    = 256ULL * 1024ULL * 1024ULL;
+    = 512ULL * 1024ULL * 1024ULL;
 // The most that budget may be raised to: an operational ceiling, not an
 // eviction threshold. The cache evicts correctly at any budget -- distinct
 // grid keys fill it and the least recently used ones go. What a budget past
-// this buys is the room to fill it: 64 GiB is already 128 grids at the
-// largest voxel budget (512^3 voxels, four bytes each), so a larger number
+// this buys is the room to fill it: 64 GiB is already 64 grids at the
+// largest voxel budget (512^3 voxels, eight bytes each), so a larger number
 // stops describing memory any host will lend and becomes a way to be killed
 // by the allocator instead of bounded by the setting. A ceiling on a budget
 // is a property of the budget, so it reads here beside it rather than in
@@ -87,6 +90,21 @@ struct VolumeSampleRequest {
     std::uint64_t maximumVoxels = defaultVolumeVoxelBudget;
     friend bool operator==(const VolumeSampleRequest&,
         const VolumeSampleRequest&) = default;
+};
+
+// One implicit surface drawn inside the volume march: the points where the
+// trilinearly interpolated field equals `value`. The field may differ from
+// the volume's; it is sampled onto a grid of the same geometry (region,
+// level, composition, budget) as the volume's, so the two line up voxel for
+// voxel. The opacity is applied once per crossing, not per ray sample.
+struct VolumeIsosurface {
+    FieldId field;
+    int component = 0;
+    double value = 0.0;               // in field units
+    std::uint32_t color = 0xFFFFFFU;  // 0x00RRGGBB
+    float opacity = 1.0F;             // [0, 1]
+    friend bool operator==(const VolumeIsosurface&, const VolumeIsosurface&)
+        = default;
 };
 
 struct VolumeRenderRequest {
@@ -118,20 +136,28 @@ struct VolumeRenderRequest {
     // and from the grid cache key, and one cached grid serves both.
     SamplingPolicy sampling = SamplingPolicy::Linear;
     std::uint64_t maximumVoxels = defaultVolumeVoxelBudget;
+    // Whether the volume itself is drawn. Off, its grid is not even sampled
+    // and `range` / `transfer` only decide what usedRange reports; at least
+    // one of the volume and the isosurface must be on.
+    bool showVolume = true;
+    std::optional<VolumeIsosurface> isosurface;
     friend bool operator==(const VolumeRenderRequest&,
         const VolumeRenderRequest&) = default;
 };
 
 // The field sampled onto a uniform grid over `region`: voxel (i, j, k) is
 // centred at lower + (i + 0.5) * pitch per axis, x fastest; NaN marks a voxel
-// no level covers, and one whose value is not a finite float -- non-finite in
-// the data, or past the range float can represent -- which the renderer treats
-// as transparent. A region reaching past the domain is allowed and comes
-// back NaN there, as the same region does on a slice.
+// no level covers, and one whose value is not finite, which the renderer
+// treats as transparent. A region reaching past the domain is allowed and
+// comes back NaN there, as the same region does on a slice.
+//
+// NaN is the grid's only sentinel -- unlike the slice and the line it carries
+// no validity mask -- so a sampler must never store an infinity to mean
+// "nothing here".
 struct VolumeGrid {
     std::array<int, 3> dims{0, 0, 0};
     RealBox region;
-    std::vector<float> values;
+    std::vector<double> values;
     // Voxels holding a value the renderer can show, which is not quite the
     // same as voxels a level covered: a covered voxel whose source data is
     // itself NaN counts here as uncovered, because nothing downstream can
@@ -189,6 +215,8 @@ struct VolumeFrame {
 // dataset: every field bounded and finite. Empty when valid.
 [[nodiscard]] std::vector<std::string> validateVolumeTransferFunction(
     const VolumeTransferFunction& transfer);
+[[nodiscard]] std::vector<std::string> validateVolumeIsosurface(
+    const VolumeIsosurface& isosurface);
 [[nodiscard]] std::vector<std::string> validateVolumeSampleRequest(
     const VolumeSampleRequest& request, int datasetDimension);
 [[nodiscard]] std::vector<std::string> validateVolumeRenderRequest(
@@ -197,6 +225,11 @@ struct VolumeFrame {
 // The sampling fields of a render request, so the one validator above and the
 // sampler itself see the same values.
 [[nodiscard]] VolumeSampleRequest volumeSampleRequestOf(
+    const VolumeRenderRequest& request);
+// The isosurface's grid: volumeSampleRequestOf with the field and component
+// swapped, so the two grids share every other parameter and hence their dims
+// and region. nullopt when the request has no isosurface.
+[[nodiscard]] std::optional<VolumeSampleRequest> isosurfaceSampleRequestOf(
     const VolumeRenderRequest& request);
 
 } // namespace amrvis

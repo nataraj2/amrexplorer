@@ -3,6 +3,8 @@
 #include "NumberFormat.hpp"
 #include "Theme.hpp"
 
+#include <amrexplorer/core/ValueMapping.hpp>
+
 #include <QCheckBox>
 #include <QEvent>
 #include <QFontDatabase>
@@ -24,9 +26,24 @@
 #include <cmath>
 #include <limits>
 #include <utility>
+#include <vector>
 
 namespace amrvis::qt {
 namespace {
+
+// Padding may reach a finite endpoint, but must not step past it.
+void padBounds(double& minimum, double& maximum, double padding)
+{
+    constexpr auto largest = std::numeric_limits<double>::max();
+    minimum = minimum < -largest + padding ? -largest : minimum - padding;
+    maximum = maximum > largest - padding ? largest : maximum + padding;
+}
+
+double rangeFraction(double value, double minimum, double maximum)
+{
+    const auto range = amrvis::resolveValueRange(minimum, maximum, false);
+    return range ? (value * range->scale - range->minimum) / range->span : 0.5;
+}
 
 // Eight curve colors picked against viewportBackground(), the mid-gray this
 // plot actually fills with. The previous set was chosen for a black background
@@ -103,8 +120,26 @@ void LinePlotWidget::setShowMarkers(bool on)
 
 QRect LinePlotWidget::plotRect() const
 {
-    constexpr int leftMargin = 92;
-    constexpr int rightMargin = 32;
+    int leftMargin = 92;
+    int rightMargin = 32;
+    // Interaction uses the last painted range, so it neither scans every
+    // sample nor changes the margins before new data is actually painted.
+    if (const auto& range = m_paintedRange) {
+        const auto xFormat = resolveNumberFormat(m_numberFormat, range->xMinimum, range->xMaximum);
+        const auto yFormat = resolveNumberFormat(m_numberFormat, range->yMinimum, range->yMaximum);
+        const QFontMetrics metrics(font());
+        for (int tick = 0; tick < 5; ++tick) {
+            const auto fraction = static_cast<double>(tick) / 4.0;
+            const auto yLabel = formatNumber(
+                std::lerp(range->yMinimum, range->yMaximum, fraction), yFormat);
+            leftMargin = std::max(leftMargin, metrics.horizontalAdvance(yLabel) + 6);
+            const auto xLabel = formatNumber(
+                std::lerp(range->xMinimum, range->xMaximum, fraction), xFormat);
+            const auto overhang = metrics.horizontalAdvance(xLabel) / 2 + 6;
+            leftMargin = std::max(leftMargin, overhang);
+            rightMargin = std::max(rightMargin, overhang);
+        }
+    }
     constexpr int topMargin = 18;
     constexpr int bottomMargin = 36;
     return QRect(leftMargin, topMargin,
@@ -112,7 +147,7 @@ QRect LinePlotWidget::plotRect() const
         std::max(height() - topMargin - bottomMargin, 16));
 }
 
-std::optional<QRectF> LinePlotWidget::automaticRange() const
+std::optional<LinePlotWidget::PlotRange> LinePlotWidget::automaticRange() const
 {
     if (m_curves == nullptr) {
         return std::nullopt;
@@ -158,23 +193,21 @@ std::optional<QRectF> LinePlotWidget::automaticRange() const
     }
     if (yMinimum == yMaximum) {
         const auto padding = std::max(std::abs(yMinimum), 1.0) * 1.0e-6;
-        yMinimum -= padding;
-        yMaximum += padding;
+        padBounds(yMinimum, yMaximum, padding);
     }
     // Pad each physical/value axis so the data is not flush against the boundary.
     constexpr double padFraction = 0.05;
-    const auto ySpan = yMaximum - yMinimum;
+    const auto yPadding = padFraction * yMaximum - padFraction * yMinimum;
     if (!usesIndexPositions(m_curves)) {
         const auto xSpan = xMaximum - xMinimum;
         xMinimum -= padFraction * xSpan;
         xMaximum += padFraction * xSpan;
     }
-    yMinimum -= padFraction * ySpan;
-    yMaximum += padFraction * ySpan;
-    return QRectF(QPointF(xMinimum, yMinimum), QPointF(xMaximum, yMaximum));
+    padBounds(yMinimum, yMaximum, yPadding);
+    return PlotRange{xMinimum, xMaximum, yMinimum, yMaximum};
 }
 
-std::optional<QRectF> LinePlotWidget::displayedRange() const
+std::optional<LinePlotWidget::PlotRange> LinePlotWidget::displayedRange() const
 {
     if (m_zoom.has_value()) {
         return m_zoom;
@@ -194,15 +227,15 @@ QString LinePlotWidget::hoverTextAt(const QPointF& position) const
 
     const auto mapX = [&](double value) {
         return plot.left()
-            + (value - range.left()) / range.width() * plot.width();
+            + (value - range.xMinimum) / (range.xMaximum - range.xMinimum) * plot.width();
     };
     const auto mapY = [&](double value) {
         return plot.bottom()
-            - (value - range.top()) / range.height() * plot.height();
+            - rangeFraction(value, range.yMinimum, range.yMaximum) * (plot.height() - 1);
     };
-    const auto cursorX = range.left()
-        + (position.x() - plot.left()) / plot.width() * range.width();
-    const auto dataRadius = hoverRadius * range.width() / plot.width();
+    const auto cursorX = range.xMinimum
+        + (position.x() - plot.left()) / plot.width() * (range.xMaximum - range.xMinimum);
+    const auto dataRadius = hoverRadius * (range.xMaximum - range.xMinimum) / plot.width();
 
     const LinePlotCurve* nearestCurve = nullptr;
     std::size_t nearestSample = 0;
@@ -251,7 +284,8 @@ QString LinePlotWidget::hoverTextAt(const QPointF& position) const
         nearestCurve->line.values[nearestSample]);
     const auto coordinateText = nearestCurve->line.positionsAreIndices
         ? QString::number(static_cast<long long>(std::llround(coordinate)))
-        : formatNumber(coordinate, m_numberFormat);
+        : formatNumber(coordinate,
+              resolveNumberFormat(m_numberFormat, range.xMinimum, range.xMaximum));
     const auto axis = nearestCurve->lineAxis >= 0
             && nearestCurve->lineAxis
                 < static_cast<int>(nearestCurve->axisNames.size())
@@ -261,7 +295,8 @@ QString LinePlotWidget::hoverTextAt(const QPointF& position) const
         .arg(QString::fromStdString(nearestCurve->fieldName))
         .arg(axis)
         .arg(coordinateText)
-        .arg(formatNumber(value, m_numberFormat));
+        .arg(formatNumber(value,
+            resolveNumberFormat(m_numberFormat, range.yMinimum, range.yMaximum)));
 }
 
 void LinePlotWidget::hideHover()
@@ -284,28 +319,43 @@ void LinePlotWidget::paintEvent(QPaintEvent* /*event*/)
         return;
     }
     const auto plot = plotRect();
-    // Normalized data rect: left/right are x min/max, top/bottom y min/max.
-    const auto xMinimum = range->left();
-    const auto xMaximum = range->right();
-    const auto yMinimum = range->top();
-    const auto yMaximum = range->bottom();
+    // Keep the data bounds separate from the pixel rectangle.
+    const auto xMinimum = range->xMinimum;
+    const auto xMaximum = range->xMaximum;
+    const auto yMinimum = range->yMinimum;
+    const auto yMaximum = range->yMaximum;
+    // Each axis resolves against what it spans, which for a zoomed plot is
+    // the visible window rather than the whole curve.
+    const auto xFormat = resolveNumberFormat(m_numberFormat, xMinimum, xMaximum);
+    const auto yFormat = resolveNumberFormat(m_numberFormat, yMinimum, yMaximum);
     const auto mapX = [&](double value) {
         return plot.left() + (value - xMinimum) / (xMaximum - xMinimum) * plot.width();
     };
     const auto mapY = [&](double value) {
-        return plot.bottom() - (value - yMinimum) / (yMaximum - yMinimum) * plot.height();
+        return plot.bottom() - rangeFraction(value, yMinimum, yMaximum) * (plot.height() - 1);
     };
 
     // Darker than the mid-gray fill so the rules read; the previous
     // 96,96,96 was only a shade off the background.
     const QPen gridPen(QColor(0x55, 0x55, 0x55));
     constexpr int tickCount = 5;
+    // Where a tick's label actually inks: centered under the tick, but never
+    // outside the widget. The margins reserve an end label's overhang from
+    // the widget's own metrics, and the painter's may not be the same ones.
+    const auto labelInk = [&](double value, const QString& label) {
+        const auto span
+            = static_cast<double>(painter.fontMetrics().horizontalAdvance(label));
+        const auto left = std::clamp(mapX(value) - span / 2.0, 0.0,
+            std::max(0.0, static_cast<double>(width()) - span));
+        return QRectF(left, plot.bottom() + 4.0, span, 16.0);
+    };
     const auto drawXTick = [&](double value, const QString& label) {
         const auto x = mapX(value);
         painter.setPen(gridPen);
         painter.drawLine(QPointF(x, plot.top()), QPointF(x, plot.bottom()));
         painter.setPen(viewportForeground());
-        painter.drawText(QRectF(x - 40.0, plot.bottom() + 4.0, 80.0, 16.0),
+        // A hair wider than the text, so centering leaves the ink in place.
+        painter.drawText(labelInk(value, label).adjusted(-1.0, 0.0, 1.0, 0.0),
             Qt::AlignHCenter | Qt::AlignTop, label);
     };
     if (usesIndexPositions(m_curves)) {
@@ -322,22 +372,50 @@ void LinePlotWidget::paintEvent(QPaintEvent* /*event*/)
             tick += step;
         }
     } else {
-        for (int tick = 0; tick < tickCount; ++tick) {
-            const auto fraction = static_cast<double>(tick) / (tickCount - 1);
-            const auto xValue = xMinimum + fraction * (xMaximum - xMinimum);
-            drawXTick(xValue, formatNumber(xValue, m_numberFormat));
+        const auto ticksFor = [&](int count) {
+            std::vector<std::pair<double, QString>> ticks;
+            for (int tick = 0; tick < count; ++tick) {
+                // When even the endpoint labels would overlap, keep one tick
+                // centered in the plot without reducing its precision.
+                const auto fraction = count == 1 ? 0.5
+                    : static_cast<double>(tick) / (count - 1);
+                const auto value = std::lerp(xMinimum, xMaximum, fraction);
+                ticks.emplace_back(value, formatNumber(value, xFormat));
+            }
+            return ticks;
+        };
+        // Measured where the labels actually land, not on an even division of
+        // the plot: a count draws its own values, and a range a few ULPs wide
+        // quantizes them to uneven pixels. Take the most ticks that clear.
+        auto ticks = ticksFor(1);
+        for (int count = tickCount; count > 1; --count) {
+            const auto candidate = ticksFor(count);
+            bool clears = true;
+            auto previousRight = std::numeric_limits<double>::lowest();
+            for (const auto& [value, label] : candidate) {
+                const auto ink = labelInk(value, label);
+                clears = clears && ink.left() >= previousRight + 12.0;
+                previousRight = ink.right();
+            }
+            if (clears) {
+                ticks = candidate;
+                break;
+            }
+        }
+        for (const auto& [value, label] : ticks) {
+            drawXTick(value, label);
         }
     }
     for (int tick = 0; tick < tickCount; ++tick) {
         const auto fraction = static_cast<double>(tick) / (tickCount - 1);
-        const auto yValue = yMinimum + fraction * (yMaximum - yMinimum);
+        const auto yValue = std::lerp(yMinimum, yMaximum, fraction);
         const auto y = mapY(yValue);
         painter.setPen(gridPen);
         painter.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y));
         painter.setPen(viewportForeground());
         painter.drawText(QRectF(0.0, y - 8.0, plot.left() - 6.0, 16.0),
             Qt::AlignRight | Qt::AlignVCenter,
-            formatNumber(yValue, m_numberFormat));
+            formatNumber(yValue, yFormat));
     }
     painter.setPen(viewportForeground());
     painter.drawRect(plot);
@@ -453,23 +531,22 @@ void LinePlotWidget::mouseReleaseEvent(QMouseEvent* event)
         }
         const auto dragged = QRect(m_pressPosition, event->position().toPoint())
             .normalized().intersected(plotRect());
-        const auto base = displayedRange();
+        const auto base = m_paintedRange;
         if (base.has_value() && dragged.width() >= 4 && dragged.height() >= 4) {
             const auto plot = plotRect();
-            const auto xMinimum = base->left()
+            const auto xMinimum = base->xMinimum
                 + static_cast<double>(dragged.left() - plot.left()) / plot.width()
-                    * base->width();
-            const auto xMaximum = base->left()
+                    * (base->xMaximum - base->xMinimum);
+            const auto xMaximum = base->xMinimum
                 + static_cast<double>(dragged.right() - plot.left()) / plot.width()
-                    * base->width();
-            const auto yMaximum = base->top()
-                + static_cast<double>(plot.bottom() - dragged.top()) / plot.height()
-                    * base->height();
-            const auto yMinimum = base->top()
-                + static_cast<double>(plot.bottom() - dragged.bottom()) / plot.height()
-                    * base->height();
-            m_zoom = QRectF(QPointF(xMinimum, yMinimum), QPointF(xMaximum, yMaximum))
-                .normalized();
+                    * (base->xMaximum - base->xMinimum);
+            const auto yMaximum = std::lerp(base->yMinimum, base->yMaximum,
+                static_cast<double>(plot.bottom() - dragged.top()) / (plot.height() - 1));
+            const auto yMinimum = std::lerp(base->yMinimum, base->yMaximum,
+                static_cast<double>(plot.bottom() - dragged.bottom()) / (plot.height() - 1));
+            if (xMinimum < xMaximum && yMinimum < yMaximum) {
+                m_zoom = PlotRange{xMinimum, xMaximum, yMinimum, yMaximum};
+            }
             update();
         }
         event->accept();

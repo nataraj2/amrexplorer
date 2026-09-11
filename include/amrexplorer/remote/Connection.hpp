@@ -42,12 +42,28 @@ inline constexpr const char* volumeSamplingUnsupportedMessage
     = "the remote server predates smooth volume sampling (protocol 1.3) and "
       "samples each ray at the nearest voxel; install a current "
       "amrexplorer-server";
+// And for isosurfaces, which a 1.5 server would leave out of the frame while
+// still drawing the volume it was asked to hide.
+inline constexpr const char* volumeIsosurfaceUnsupportedMessage
+    = "the remote server predates isosurfaces (protocol 1.6) and renders the "
+      "volume alone; install a current amrexplorer-server";
 // And for derived fields, which a 1.3 server would not read off an open
 // request at all -- so it would answer a catalog of stored fields while the
 // client believed the definitions had been installed.
 inline constexpr const char* derivedFieldsUnsupportedMessage
     = "the remote server predates derived fields (protocol 1.4); install a "
       "current amrexplorer-server";
+// The odd one out: nothing refuses, because a pre-1.5 server answers every
+// request perfectly well -- just with float values. That is invisible until a
+// field's values differ below float's resolution, where the picture comes back
+// flat and looks like the data rather than the transport. Said once when the
+// session opens, since there is no gesture to attach it to and nothing the
+// user can do about it mid-session.
+inline constexpr const char* doublePrecisionValuesUnsupportedMessage
+    = "the remote server predates full-precision values (protocol 1.5) and "
+      "sends them as floats, so a field whose values differ only in their "
+      "eighth significant digit or beyond will render flat; install a current "
+      "amrexplorer-server";
 
 class Connection : public std::enable_shared_from_this<Connection> {
 public:
@@ -87,10 +103,18 @@ public:
     // Whether the negotiated protocol carries the volume march's sampling
     // policy (1.3). A 1.2 peer renders volumes but always sampled nearest.
     [[nodiscard]] bool supportsVolumeSampling() const noexcept;
+    // Whether the negotiated protocol carries an isosurface and the volume's
+    // visibility on a rendered frame (1.6). A 1.5 peer renders the volume
+    // alone whatever it is sent.
+    [[nodiscard]] bool supportsVolumeIsosurface() const noexcept;
     // Whether the negotiated protocol carries derived-field definitions on an
     // open request (1.4). A 1.3 peer opens datasets perfectly well; it just
     // cannot be asked to compute a field.
     [[nodiscard]] bool supportsDerivedFields() const noexcept;
+    // Whether the negotiated protocol carries values as doubles (1.5). Unlike
+    // its siblings this gates no call: a 1.4 peer serves every request, at
+    // float precision. Ask it to tell the user, not to refuse them.
+    [[nodiscard]] bool supportsDoublePrecisionValues() const noexcept;
     // Renders a volume on the server and returns the frame (protocol 1.2).
     // Ask supportsVolumeRendering() first: this throws when the server
     // negotiated an older protocol.

@@ -146,15 +146,15 @@ int main()
         threw = true;
     }
     require(threw, "contourValues accepted a non-positive logarithmic range");
-    threw = false;
-    try {
-        (void)amrvis::contourValues(
-            -std::numeric_limits<double>::max(),
-            std::numeric_limits<double>::max(), 4, false);
-    } catch (const std::invalid_argument&) {
-        threw = true;
+    const auto huge = std::numeric_limits<double>::max();
+    const auto wideLevels = amrvis::contourValues(-huge, huge, 4, false);
+    const std::vector<double> fractions{-0.75, -0.25, 0.25, 0.75};
+    for (std::size_t index = 0; index < fractions.size(); ++index) {
+        require(std::isfinite(wideLevels[index])
+                && std::abs(wideLevels[index] / huge - fractions[index])
+                    <= 2.0 * std::numeric_limits<double>::epsilon(),
+            "contour levels across an overflowing span were not evenly spaced");
     }
-    require(threw, "contourValues accepted a range whose span overflows to infinity");
     threw = false;
     try {
         (void)amrvis::contourValues(
@@ -190,6 +190,88 @@ int main()
         amrvis::generateContours(tinyPlane, {2.5e-24});
     require(tinySegments.size() == 4,
         "small-magnitude varying field was treated as constant");
+
+    // Subnormal edge differences have overflowing reciprocals, even though
+    // the interpolation fraction is finite. Cover both edge directions and
+    // a corner-exact level as well as an interior crossing.
+    for (const double scale : {1.0e-310, -1.0e-310}) {
+        auto subnormalPlane = makePlane();
+        for (auto& value : subnormalPlane.values) {
+            value *= scale;
+        }
+        for (const double level : {2.0, 2.5}) {
+            const auto reference = amrvis::generateContours(plane, {level});
+            const auto subnormal = amrvis::generateContours(
+                subnormalPlane, {level * scale});
+            require(subnormal.size() == reference.size(),
+                "subnormal field changed the contour segment count");
+            for (const auto& segment : reference) {
+                require(hasSegment(subnormal,
+                            segment.x0, segment.y0, segment.x1, segment.y1),
+                    "subnormal field changed the contour geometry");
+            }
+            const auto display = amrvis::contourPolylinesForDisplay(
+                subnormalPlane, {level * scale}, 100, 100);
+            require(!display.empty(),
+                "subnormal field lost its display contours");
+            for (const auto& polyline : display) {
+                for (const auto& point : polyline.points) {
+                    require(std::isfinite(point[0]) && std::isfinite(point[1]),
+                        "subnormal contour has nonfinite display coordinates");
+                }
+            }
+        }
+    }
+
+    // Scaling a field must preserve crossings and saddle connectivity even
+    // when subtracting endpoints or summing the four corners would overflow.
+    for (const auto& samples : {std::array{-1.0, -1.0, 1.0, 1.0},
+             std::array{-1.0, 1.0, -1.0, 1.0},
+             std::array{0.5, 0.8, 0.8, 0.5}}) {
+        amrvis::ScalarPlane referencePlane;
+        referencePlane.width = 2;
+        referencePlane.height = 2;
+        referencePlane.values.assign(samples.begin(), samples.end());
+        referencePlane.valid.assign(4, 1);
+        referencePlane.sourceLevel.assign(4, 0);
+        for (const double magnitude : {1.0e308,
+                 std::numeric_limits<double>::max()}) {
+            for (const double sign : {1.0, -1.0}) {
+                auto signedPlane = referencePlane;
+                for (auto& value : signedPlane.values) {
+                    value *= sign;
+                }
+                auto scaledPlane = signedPlane;
+                for (auto& value : scaledPlane.values) {
+                    value *= magnitude;
+                }
+                for (const double level : {-1.0, 0.0, 0.6, 0.75, 1.0}) {
+                    const auto reference = amrvis::generateContours(
+                        signedPlane, {level * sign});
+                    const auto scaled = amrvis::generateContours(
+                        scaledPlane, {level * sign * magnitude});
+                    require(scaled.size() == reference.size(),
+                        "large field changed the contour segment count");
+                    for (const auto& segment : reference) {
+                        require(hasSegment(scaled, segment.x0, segment.y0,
+                                    segment.x1, segment.y1),
+                            "large field changed contour crossings or connectivity");
+                    }
+                    const auto display = amrvis::contourPolylinesForDisplay(
+                        scaledPlane, {level * sign * magnitude}, 100, 100);
+                    require(display.empty() == reference.empty(),
+                        "large field changed display contour presence");
+                    for (const auto& polyline : display) {
+                        for (const auto& point : polyline.points) {
+                            require(std::isfinite(point[0])
+                                    && std::isfinite(point[1]),
+                                "large contour has nonfinite display coordinates");
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Invalidating corner (1, 1) must suppress the four cells touching it,
     // leaving only cell (2, 0).

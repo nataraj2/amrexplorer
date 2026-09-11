@@ -42,9 +42,19 @@ contour polylines, vector glyphs, resolved color range — with no Qt dependency
 `MainWindow` is the one window; it owns the plane views (`PlaneViewState`
 per 2-D view and 3-D panel), the slice request/arrival paths, the
 visible-range sync that keeps three 3-D panels on one color range, zoom/pan,
-crosshairs and the probe, and the menus and docks. Everything else the window
-does is delegated to an **owned collaborator**, each a `QObject` created by
-the window, wired to it in one of two ways:
+crosshairs and the probe, and the menus and docks. Everything about one
+dataset lives in a `DatasetLayer` (session, catalog, field and level
+selectors, range controls, colour bar, and three plane view states); the
+window holds two, the primary and an optional companion plotfile that shares
+a plane with it (`PairGeometry`, `MainWindowCompanion.cpp`). A layer's session
+may be local or remote in any combination; a remote companion rides the
+primary's own connection, or the window's remote session beside a local
+primary. Each `ImageView` draws one tile per layer in a shared scene, so a
+companion adds states and tiles rather than panels, and a paired zoom is a
+scene window that each layer maps back to its own region (`PairLayout`).
+Everything else the window does is
+delegated to an **owned collaborator**, each a `QObject` created by the
+window, wired to it in one of two ways:
 
 - **`Hooks`** — a struct of `std::function`s the window fills in at
   construction, for what the collaborator must *ask* the window (the open
@@ -138,7 +148,8 @@ either should preserve its invariants.
    re-derives and cross-checks every server *response* (raster size, region,
    source levels, grid-box provenance, page/particle shape, a rendered
    volume frame's size, range and sampling metrics) against the request
-   before the client trusts it.
+   before the client trusts it, and checks a volume request's fields -- the
+   volume's and the isosurface's -- against the catalog before it is sent.
 
 ## Where to start reading
 

@@ -218,6 +218,11 @@ table SliceViewResponse {
   grid_boxes_included:bool (id: 11);
   grid_boxes:[SliceGridBox] (id: 12);
   grid_boxes_truncated:bool (id: 13);
+  // Protocol 1.5: the values in the precision they are held in. Exactly one
+  // of `values` and `values_f64` is populated -- the float one only for a
+  // peer that predates 1.5, which cannot read this field. See the note at
+  // the foot of this file.
+  values_f64:[double] (id: 14);
 }
 
 table LineViewRequest {
@@ -245,6 +250,8 @@ table LineViewResponse {
   cache_hits:ulong (id: 8);
   payload_bytes_read:ulong (id: 9);
   cache:CacheState (id: 10);
+  // Protocol 1.5: see SliceViewResponse.values_f64.
+  values_f64:[double] (id: 11);
 }
 
 table DatasetPageRequest {
@@ -271,6 +278,8 @@ table DatasetPageResponse {
   truncated_x:bool (id: 10);
   truncated_y:bool (id: 11);
   cache:CacheState (id: 12);
+  // Protocol 1.5: see SliceViewResponse.values_f64.
+  values_f64:[double] (id: 13);
 }
 
 table ParticleSampleRequest {
@@ -401,6 +410,18 @@ table RenderedFrameRequest {
   // a server that predates 1.3 does -- but a 1.3 client never relies on that,
   // because the version gate stops it asking such a server for Linear at all.
   sampling:SamplingPolicy (id: 20);
+  // Protocol 1.6: whether the volume is drawn at all, and the isosurface --
+  // its own field and component, the iso-value in field units, a 0x00RRGGBB
+  // colour and a [0, 1] opacity applied once per crossing. has_isosurface
+  // rather than a nested table so a 1.5 peer sees defaults it already
+  // understands; the version gate stops a 1.6 client sending either to it.
+  show_volume:bool = true (id: 21);
+  has_isosurface:bool (id: 22);
+  isosurface_field:uint (id: 23);
+  isosurface_component:int (id: 24);
+  isosurface_value:double (id: 25);
+  isosurface_color:uint (id: 26);
+  isosurface_opacity:float (id: 27);
 }
 
 // Premultiplied 0xAARRGGBB pixels, row 0 at the top, exactly width x height.
@@ -467,6 +488,15 @@ table Envelope {
   request_id:ulong (id: 2);
   payload:Payload (id: 4);
 }
+
+// Protocol 1.5 pairs each value vector with a `values_f64` carrying the same
+// samples as doubles. The element width cannot change under a field id -- the
+// verifier checks element count against byte length, so a 1.4 peer would read
+// half the bytes and pass -- so the float field stays and the sender fills
+// exactly one: `values_f64` for a 1.5 peer, `values` for an older one. A
+// decoder takes `values_f64` when present, promotes `values` otherwise, and
+// rejects a response carrying both. The float fields can be dropped at the
+// next major.
 
 root_type Envelope;
 file_identifier "AVR2";

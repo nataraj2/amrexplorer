@@ -23,12 +23,17 @@
 #                 sequence-density-preserve |
 #                 sequence-equal-size-transform-preserve |
 #                 sequence-geometry-refit | sequence-noop | sequence-failure |
-#                 remote-canvas-wheel | remote-cell-aspect | volume |
+#                 remote-canvas-wheel | remote-cell-aspect |
+#                 physical-aspect | physical-fixed-scale |
+#                 remote-physical-aspect | companion |
+#                 remote-companion | companion-derived | companion-zoom |
+#                 mixed-companion |
+#                 volume |
 #                 derived-field | derived-field-sequence |
 #                 derived-field-frames | derived-field-playback |
 #                 scale-state | effective-scale |
 #                 arrow-key-routing | animation-dock-role | open-failure |
-#                 idle-ui-state | sequence-scale-report |
+#                 idle-ui-state | menu-shortcuts | sequence-scale-report |
 #                 spherical-scale-report |
 #                 fixed-scale-centre | fab-overlap-failure |
 #                 fab-direct-open-failure
@@ -42,10 +47,14 @@ set(ENV{QT_QPA_PLATFORM} offscreen)
 
 # Isolate QSettings per run: a fresh, empty config directory makes every smoke
 # test start from defaults, so persisted UI state (spherical display mode and
-# supersample factor, palette, log scale, ...) never leaks between runs or from
-# the developer's own config and skews an assertion.
+# supersample factor, palette, aspect mode, ...) never leaks between runs or
+# from the developer's own config and skews an assertion. XDG_CONFIG_HOME
+# does that on Linux alone; AMREXPLORER_SETTINGS_DIR makes the test binary
+# store its QSettings there on every platform (the registry and macOS
+# preferences ignore XDG).
 file(REMOVE_RECURSE "${WORK}/config")
 set(ENV{XDG_CONFIG_HOME} "${WORK}/config")
+set(ENV{AMREXPLORER_SETTINGS_DIR} "${WORK}/config")
 
 macro(run_or_die)
     execute_process(COMMAND ${ARGN}
@@ -58,12 +67,19 @@ macro(run_or_die)
     endif()
 endmacro()
 
-if(MODE STREQUAL "slice")
+if(MODE STREQUAL "adaptive-precision")
+    run_or_die("${MATERIALIZER}" "${SOURCE}" "${WORK}/plt")
+    run_or_die("${AMREXPLORER_QT}" --adaptive-precision-smoke-test "${WORK}/plt")
+elseif(MODE STREQUAL "menu-shortcuts")
+    run_or_die("${MATERIALIZER}" "${SOURCE}" "${WORK}/plt")
+    run_or_die("${AMREXPLORER_QT}" --menu-shortcuts-smoke-test "${WORK}/plt")
+elseif(MODE STREQUAL "slice")
     run_or_die("${MATERIALIZER}" "${SOURCE}" "${WORK}/plt")
     run_or_die("${AMREXPLORER_QT}" --slice-smoke-test "${WORK}/plt")
 elseif(MODE STREQUAL "volume")
     run_or_die("${MATERIALIZER}" "${SOURCE}" "${WORK}/plt")
     run_or_die("${AMREXPLORER_QT}" --volume-smoke-test "${WORK}/plt")
+    run_or_die("${AMREXPLORER_QT}" --isosurface-smoke-test "${WORK}/plt")
 elseif(MODE STREQUAL "derived-field")
     run_or_die("${MATERIALIZER}" "${SOURCE}" "${WORK}/plt")
     run_or_die("${AMREXPLORER_QT}" --derived-field-smoke-test "${WORK}/plt")
@@ -214,6 +230,45 @@ elseif(MODE STREQUAL "remote-cell-aspect")
     run_or_die("${MATERIALIZER}" "${SOURCE}" "${WORK}/plt")
     run_or_die("${AMREXPLORER_QT}" --remote-cell-aspect-smoke-test
         "${WORK}/plt")
+elseif(MODE STREQUAL "physical-aspect")
+    run_or_die("${MATERIALIZER}" "${SOURCE}" "${WORK}/plt")
+    run_or_die("${AMREXPLORER_QT}" --physical-aspect-smoke-test "${WORK}/plt")
+elseif(MODE STREQUAL "physical-fixed-scale")
+    run_or_die("${MATERIALIZER}" "${SOURCE}" "${WORK}/plt")
+    run_or_die("${AMREXPLORER_QT}" --physical-fixed-scale-smoke-test "${WORK}/plt")
+elseif(MODE STREQUAL "remote-physical-aspect")
+    run_or_die("${MATERIALIZER}" "${SOURCE}" "${WORK}/plt")
+    run_or_die("${AMREXPLORER_QT}" --remote-physical-aspect-smoke-test
+        "${WORK}/plt")
+elseif(MODE STREQUAL "companion")
+    # Two plotfiles sharing a plane: SOURCE above SOURCE2, touching at z = 0.
+    run_or_die("${MATERIALIZER}" "${SOURCE}" "${WORK}/upper")
+    run_or_die("${MATERIALIZER}" "${SOURCE2}" "${WORK}/lower")
+    # The companion path ends in a separator, as a shell completion leaves
+    # it; its name must still be the directory's.
+    run_or_die("${AMREXPLORER_QT}" --companion-smoke-test
+        "${WORK}/upper" "${WORK}/lower/")
+elseif(MODE STREQUAL "remote-companion")
+    # The same pair, both served by the in-process loopback server.
+    run_or_die("${MATERIALIZER}" "${SOURCE}" "${WORK}/upper")
+    run_or_die("${MATERIALIZER}" "${SOURCE2}" "${WORK}/lower")
+    run_or_die("${AMREXPLORER_QT}" --remote-companion-smoke-test
+        "${WORK}/upper" "${WORK}/lower")
+elseif(MODE STREQUAL "companion-derived")
+    run_or_die("${MATERIALIZER}" "${SOURCE}" "${WORK}/upper")
+    run_or_die("${MATERIALIZER}" "${SOURCE2}" "${WORK}/lower")
+    run_or_die("${AMREXPLORER_QT}" --companion-derived-smoke-test
+        "${WORK}/upper" "${WORK}/lower")
+elseif(MODE STREQUAL "companion-zoom")
+    run_or_die("${MATERIALIZER}" "${SOURCE}" "${WORK}/upper")
+    run_or_die("${MATERIALIZER}" "${SOURCE2}" "${WORK}/lower")
+    run_or_die("${AMREXPLORER_QT}" --companion-zoom-smoke-test
+        "${WORK}/upper" "${WORK}/lower")
+elseif(MODE STREQUAL "mixed-companion")
+    run_or_die("${MATERIALIZER}" "${SOURCE}" "${WORK}/upper")
+    run_or_die("${MATERIALIZER}" "${SOURCE2}" "${WORK}/lower")
+    run_or_die("${AMREXPLORER_QT}" --mixed-companion-smoke-test
+        "${WORK}/upper" "${WORK}/lower")
 elseif(MODE STREQUAL "remote-canvas-wheel")
     run_or_die("${MATERIALIZER}" "${SOURCE}" "${WORK}/plt")
     run_or_die("${AMREXPLORER_QT}" --remote-canvas-wheel-smoke-test
@@ -352,6 +407,15 @@ elseif(MODE STREQUAL "quit-on-failure")
         file(REMOVE "${payload}")
     endforeach()
     run_or_die("${AMREXPLORER_QT}" --quit-smoke-test "${WORK}/plt")
+elseif(MODE STREQUAL "export-axes")
+    run_or_die("${MATERIALIZER}" "${SOURCE}" "${WORK}/plt00000")
+    run_or_die("${MATERIALIZER}" "${SOURCE}" "${WORK}/plt00010" "2.5")
+    file(GLOB oldExportFrames "${WORK}/axes*.png")
+    if(oldExportFrames)
+        file(REMOVE ${oldExportFrames})
+    endif()
+    run_or_die("${AMREXPLORER_QT}" --export-axes-smoke-test
+        "${WORK}/plt00000" "${WORK}/plt00010")
 elseif(MODE STREQUAL "export-quit")
     run_or_die("${MATERIALIZER}" "${SOURCE}" "${WORK}/plt00000")
     run_or_die("${MATERIALIZER}" "${SOURCE}" "${WORK}/plt00010" "2.5")

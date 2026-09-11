@@ -1,5 +1,6 @@
 #include <amrexplorer/pipeline/DisplayCoordinator.hpp>
 
+#include <amrexplorer/core/ValueMapping.hpp>
 #include <amrexplorer/render2d/ScalarRenderer.hpp>
 
 #include <algorithm>
@@ -11,22 +12,34 @@ namespace amrvis {
 std::optional<std::pair<double, double>>
 DisplayCoordinator::cachedFullDomainRange(const RangeKey& key) const
 {
-    if (m_rangeKey && *m_rangeKey == key) {
-        return m_range;
+    const auto found = std::find_if(m_ranges.begin(), m_ranges.end(),
+        [&key](const auto& entry) { return entry.first == key; });
+    if (found == m_ranges.end()) {
+        return std::nullopt;
     }
-    return std::nullopt;
+    return found->second;
 }
 
 void DisplayCoordinator::storeFullDomainRange(
     const RangeKey& key, std::pair<double, double> range)
 {
-    m_rangeKey = key;
-    m_range = range;
+    const auto found = std::find_if(m_ranges.begin(), m_ranges.end(),
+        [&key](const auto& entry) { return entry.first == key; });
+    if (found != m_ranges.end()) {
+        found->second = range;
+        return;
+    }
+    // Two layers, each with a field or two on show, fit with room to spare.
+    constexpr std::size_t maximumEntries = 8;
+    if (m_ranges.size() >= maximumEntries) {
+        m_ranges.erase(m_ranges.begin());
+    }
+    m_ranges.emplace_back(key, range);
 }
 
 void DisplayCoordinator::invalidateRangeCache()
 {
-    m_rangeKey.reset();
+    m_ranges.clear();
 }
 
 std::optional<std::pair<double, double>> DisplayCoordinator::sharedVisibleRange(
@@ -79,10 +92,11 @@ void DisplayCoordinator::realignArrivalToRange(SliceDisplayResult& result,
     result.maximum = range.second;
     // The reused full-domain range is a superset of this arrival's own range,
     // so it can cross zero even when the arrival was all-positive (log resolved
-    // true per panel). Log is only viable when the shared minimum is positive;
-    // degrade to linear otherwise so renderScalarPlane does not reject the
-    // non-positive minimum (see shared-log-range-render-throw-fails-load).
-    result.logarithmic = result.logarithmic && range.first > 0.0;
+    // true per panel). Degrade to linear wherever the mapping does not exist,
+    // so renderScalarPlane does not reject it
+    // (see shared-log-range-render-throw-fails-load).
+    result.logarithmic = result.logarithmic
+        && logarithmicRangeViable(range.first, range.second);
     if (!realignRasterAndContours) {
         return;
     }
@@ -128,13 +142,14 @@ DisplayCoordinator::renderPanelsToSharedRange(
     }
     SharedRangeSync sync;
     sync.range = *shared;
-    // One log flag for every panel: log only when the shared minimum is
-    // positive, matching how a single panel degrades to linear. Keeping it
-    // per-panel would render an all-positive plane logarithmically against a
-    // union that crosses zero, and renderScalarPlane rejects a non-positive
-    // log minimum -- which threw and failed the whole load
+    // One log flag for every panel, and only where the mapping exists,
+    // matching how a single panel degrades to linear. Keeping it per-panel
+    // would render an all-positive plane logarithmically against a union that
+    // crosses zero, and renderScalarPlane rejects any range it cannot map --
+    // which threw and failed the whole load
     // (see shared-log-range-render-throw-fails-load).
-    sync.logarithmic = logarithmic && sync.range.first > 0.0;
+    sync.logarithmic = logarithmic
+        && logarithmicRangeViable(sync.range.first, sync.range.second);
     sync.panels.resize(panels.size());
     for (std::size_t index = 0; index < panels.size(); ++index) {
         const auto& panel = panels[index];

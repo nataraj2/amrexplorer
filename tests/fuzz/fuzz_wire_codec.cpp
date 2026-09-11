@@ -54,11 +54,23 @@ bool finite(const amrvis::RealBox& box)
 }
 
 // Bitwise equality: sample values may legitimately be NaN, which == denies.
-bool sameBits(const std::vector<float>& a, const std::vector<float>& b)
+bool sameBits(const std::vector<double>& a, const std::vector<double>& b)
 {
     return a.size() == b.size()
         && (a.empty()
-            || std::memcmp(a.data(), b.data(), a.size() * sizeof(float)) == 0);
+            || std::memcmp(a.data(), b.data(), a.size() * sizeof(double)) == 0);
+}
+
+// The values the payload carries, whichever field holds them -- restated here
+// rather than borrowed from the codec so this stays a check on the codec and
+// not a copy of it. An accepted payload never populates both.
+std::vector<double> wireValues(
+    const std::vector<float>& narrow, const std::vector<double>& wide)
+{
+    if (!wide.empty()) {
+        return wide;
+    }
+    return {narrow.begin(), narrow.end()};
 }
 
 // Postconditions of an accepted payload: what its fromWire converter claims
@@ -191,9 +203,12 @@ void checkConverted(
     }
     const auto expected = static_cast<std::size_t>(plane.width)
         * static_cast<std::size_t>(plane.height);
+    if (!wire.values.empty() && !wire.values_f64.empty()) {
+        fail("SliceViewResponse converter accepted both value vectors");
+    }
     if (plane.values.size() != expected || plane.valid.size() != expected
         || plane.sourceLevel.size() != expected
-        || !sameBits(plane.values, wire.values)
+        || !sameBits(plane.values, wireValues(wire.values, wire.values_f64))
         || !finite(plane.physicalRegion)
         || result.gridBoxes.size() != wire.grid_boxes.size()) {
         fail("SliceViewResponse converter accepted inconsistent vectors");
@@ -229,7 +244,16 @@ void checkConverted(const fb::RenderedFrameRequestT& wire,
         // only against a peer that disagrees, which is what the composition
         // check above exists to catch.
         || roundTripped.sampling != wire.sampling
-        || result.outputSize[0] != wire.width || result.outputSize[1] != wire.height) {
+        || result.outputSize[0] != wire.width || result.outputSize[1] != wire.height
+        // Protocol 1.6: the isosurface arrives exactly when the flag says so,
+        // with a finite value and opacity, and the volume flag is carried.
+        || result.showVolume != wire.show_volume
+        || result.isosurface.has_value() != wire.has_isosurface
+        || (result.isosurface
+            && (!finite(result.isosurface->value)
+                || !std::isfinite(result.isosurface->opacity)
+                || result.isosurface->field.value != wire.isosurface_field
+                || result.isosurface->color != wire.isosurface_color))) {
         fail("RenderedFrameRequest converter accepted a bad request");
     }
 }
@@ -265,8 +289,12 @@ void checkConverted(
 {
     const auto& line = result.line;
     const auto expected = line.positions.size();
+    if (!wire.values.empty() && !wire.values_f64.empty()) {
+        fail("LineViewResponse converter accepted both value vectors");
+    }
     if (line.values.size() != expected || line.valid.size() != expected
         || line.sourceLevel.size() != expected
+        || !sameBits(line.values, wireValues(wire.values, wire.values_f64))
         || line.positions != wire.positions
         || !std::all_of(line.positions.begin(), line.positions.end(),
             [](double position) { return std::isfinite(position); })) {
@@ -323,8 +351,12 @@ void checkConverted(
     }
     const auto expected = static_cast<std::size_t>(result.nx)
         * static_cast<std::size_t>(result.ny);
+    if (!wire.values.empty() && !wire.values_f64.empty()) {
+        fail("DatasetPageResponse converter accepted both value vectors");
+    }
     if (result.values.size() != expected || result.covered.size() != expected
-        || !sameBits(result.values, wire.values) || wire.lower.size() != 2
+        || !sameBits(result.values, wireValues(wire.values, wire.values_f64))
+        || wire.lower.size() != 2
         || wire.upper.size() != 2
         || !std::equal(result.lower.begin(), result.lower.end(),
             wire.lower.begin())) {
@@ -803,6 +835,12 @@ std::vector<std::vector<std::uint8_t>> wireSeeds()
         request.transfer.opacities = {0.0F, 0.25F, 0.5F, 1.0F};
         request.samplesPerVoxel = 3;
         request.maximumVoxels = 4096;
+        // Protocol 1.6: an isosurface, so its fields are in the buffer to be
+        // mutated, and the volume hidden, since true is the schema default
+        // and would be left out.
+        request.showVolume = false;
+        request.isosurface = amrvis::VolumeIsosurface{
+            amrvis::FieldId{2}, 1, 0.75, 0x40C0FFU, 0.6F};
         add(codec::toWire(request));
         amrvis::VolumeFrame frame;
         frame.width = 2;

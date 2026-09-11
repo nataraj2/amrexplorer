@@ -32,6 +32,7 @@
 #include "ScientificDoubleSpinBox.hpp"
 #include "SetContoursDialog.hpp"
 #include "Theme.hpp"
+#include "ThemeController.hpp"
 #include "UserGuideDialog.hpp"
 
 #include <amrexplorer/io/FitsWriter.hpp>
@@ -55,6 +56,7 @@
 #include <QWheelEvent>
 #include <QCloseEvent>
 #include <QColorDialog>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDialog>
@@ -107,6 +109,8 @@
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
 #include <QVBoxLayout>
+#include <QDoubleSpinBox>
+#include <QAbstractButton>
 #include <QtConcurrentRun>
 #include <QtDebug>
 
@@ -302,5 +306,47 @@ inline std::atomic<int> waiting{0};        // # of workers currently parked
 
 } // namespace visible_sync_test
 #endif
+
+// Fill a level combo for a dataset with the given finest level: "Finest
+// available", the composite "Levs 0-N" rows, then "Level N only". Shared by
+// the primary's selector and a companion's.
+inline void populateLevelCombo(QComboBox* combo, int finestLevel)
+{
+    combo->clear();
+    combo->addItem(QObject::tr("Finest available"), -1);
+    // "Level N only" is redundant when there is only one level; the whole
+    // block is skipped for finestLevel == 0 so the combo shows just the
+    // "Finest available" entry.
+    if (finestLevel <= 0) {
+        return;
+    }
+    // "Update to Level N" (composite 0..N) in reverse order, from
+    // finestLevel-1 down to 1; only when there are at least three levels.
+    for (int level = finestLevel - 1; level >= 1; --level) {
+        combo->addItem(QObject::tr("Levs 0-%1").arg(level),
+            kUpdateToLevelOffset + level);
+    }
+    for (int level = 0; level <= finestLevel; ++level) {
+        combo->addItem(QObject::tr("Level %1 only").arg(level), level);
+    }
+}
+
+// A dataset's short name for titles, toolbars, the dock and export file
+// names: the plotfile directory's basename. A path written with a trailing
+// separator has an empty filename(), so the separator is dropped first; a
+// bare root falls back to the whole path.
+inline QString datasetDisplayName(const std::filesystem::path& path)
+{
+    auto trimmed = path.string();
+    while (trimmed.size() > 1
+        && (trimmed.back() == '/' || trimmed.back() == std::filesystem::path::preferred_separator)) {
+        trimmed.pop_back();
+    }
+    auto name = std::filesystem::path(trimmed).filename().string();
+    if (name.empty()) {
+        name = trimmed;
+    }
+    return QString::fromStdString(name);
+}
 
 } // namespace amrvis::qt

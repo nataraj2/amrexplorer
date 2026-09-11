@@ -35,6 +35,10 @@ You can also start without a path and use the File menu:
   Headerless `_D_*` files are supported when their companion `_H` file is
   present in the same directory.
 - **Open MultiFab...** opens a standalone MultiFab header.
+- **Open Companion Plotfile...** shows a second 3-D plotfile in the same
+  window beside the open one, when the two share a plane -- see
+  [Companion plotfiles](#companion-plotfiles); **Open Remote Companion
+  Plotfile...** takes one from a server. **Close Companion** removes it.
 - **Open New Window** creates an independent viewer for side-by-side
   comparison.
 - **Close Window** (Ctrl+W, Cmd+W on macOS) closes only the current window;
@@ -152,6 +156,10 @@ provided the script passes the remote command through (`exec ssh target
 - *"unknown option: --stdio"*: the `amrexplorer-server` installed on the
   remote machine predates this client. Build and install a current one -- see
   [INSTALL.md](../INSTALL.md).
+- *"Remote values: float"* in the status bar: the remote server predates
+  full-precision values (protocol 1.5), so a field whose values differ only in
+  their eighth significant digit or beyond renders flat. Hover it for the full
+  notice; installing a current server clears it.
 - The tail of the remote side's error output is included in the failure
   message, and the Diagnostics dock shows the session's state at any time.
 - A shell startup file that prints output is harmless before the session
@@ -189,6 +197,13 @@ The main controls are:
    3-D panels.
 4. **Range, Log, and Palette** control the mapping from values to colors.
 5. **Slice panels** display the XY, XZ, and YZ planes for a 3-D dataset.
+   A lower-right scale bar uses native plotfile coordinates by default and
+   labels them as code units in scientific notation. Use **View > Length
+   Units...** to identify the plotfile coordinate unit, or **View > Scale Bar**
+   to show or hide the annotation. It is omitted when the horizontal coordinate
+   is an angle (the spherical theta-r view), and the option is disabled when
+   the screen does not show the same length per pixel along both axes (see
+   [Aspect ratio and axis scaling](#aspect-ratio-and-axis-scaling)).
 6. **Isometric view** shows the domain, grid boxes, and current slice planes;
    **View > Volume Rendering...** opens the same view with the field
    ray-cast into it.
@@ -261,7 +276,11 @@ screen pixels per finest-level cell. A very wide local domain cannot be shown
 at finest resolution all at once, so the requested factor may not be reachable;
 the Scale button then reports what it applied, such as `32x→16x`. Rubber-band
 zoom is unaffected: selecting a subregion re-reads that region at finest
-resolution.
+resolution. When the display is stretched (see
+[Aspect ratio and axis scaling](#aspect-ratio-and-axis-scaling)), the factor
+applies along the dataset's tightest axis and the others get more pixels per
+cell, the same number on every panel: in Physical Size a fixed scale shows x
+as wide on the XY panel as on the XZ panel beside it.
 
 The line-plot window can accumulate curves, which is useful when comparing
 variables, levels, or positions. Its horizontal axis uses physical coordinates
@@ -289,6 +308,46 @@ Ctrl+W (Cmd+W on macOS), the same key that closes the main and volume windows.
 Choose **View > Number Format...** to set the `printf`-style format used for
 numeric readouts. The default is `%g`.
 
+A `%g` or `%G` format with no explicit precision adapts its digits to the
+range being shown, so a field whose values differ only in their twelfth digit
+still reads as distinct numbers instead of the same string repeated down the
+colour bar. Ordinary data is unaffected: trailing zeros are dropped, so `0.1`
+stays `0.1`. Give an explicit precision, such as `%.13g`, to pin the digit
+count and stop it adapting; **Full precision** in that dialog sets `%.17g`,
+which is every digit a double can carry.
+
+## Aspect ratio and axis scaling
+
+By default a slice panel draws one square screen pixel per finest-level cell,
+so its shape is the region's extent in cells. Plotfiles whose cells are not
+square (dx differs from dy or dz) then look stretched relative to the physical
+domain. **View > Aspect Ratio** offers two proportions:
+
+- **Cell Counts** — the default described above.
+- **Physical Size** — each axis is scaled by its finest-level cell size, so the
+  panel has the physical aspect of the region it shows. A domain a thousand
+  times taller than wide becomes a thin strip; use axis scaling to widen it.
+
+**View > Aspect Ratio > Axis Scaling...** stretches the X, Y, and Z axes by
+factors of your own, on top of the chosen proportion. Each 3-D panel applies
+the factors of the two axes it shows. With a [companion
+plotfile](#companion-plotfiles) open, the axis perpendicular to the shared
+plane has one factor per dataset. The factors reset to 1 when you open a
+new dataset or sequence and are kept while stepping through a sequence's
+frames; the proportion persists across sessions.
+
+The stretch is applied on screen only. The slice raster keeps one sample per
+finest cell, readouts and overlays follow the stretch, and image and animation
+exports reproduce it. An export caps its longer side at 8192 pixels, so an
+extreme stretch reduces the resolution of the shorter side. The scale bar is offered while the screen shows the same
+length per pixel along both axes: in Cell Counts mode that requires square
+cells, in Physical Size mode equal axis factors. Vector glyphs are drawn in
+cell units, so a stretched display skews their arrows.
+
+The controls are unavailable for 2-D spherical plotfiles, whose R-Z view is
+already physical, and Physical Size is unavailable for standalone FABs and
+MultiFabs, which carry no cell sizes.
+
 ## Working with 3-D data
 
 A 3-D dataset is shown as three orthogonal slices:
@@ -309,6 +368,63 @@ directly comparable.
 The **Plane Sweep** controls in the Animation panel select an axis and step or
 play through its sample indices. The speed slider controls the delay between
 frames.
+
+### Companion plotfiles
+
+Coupled simulations often write two plotfiles that meet at a plane: an
+atmosphere above the ocean surface and the ocean below it, for example. With
+a 3-D plotfile open, choose **File > Open Companion Plotfile...** (or start
+`amrexplorer atmosphere_plt --companion ocean_plt`) to show the second one in
+the same window. The two domains must touch along exactly one axis and
+overlap along the other two; anything else is refused with a message and the
+open dataset stays as it was.
+
+The companion may be local or remote whatever the open plotfile is. **File >
+Open Companion Plotfile...** browses this machine; **File > Open Remote
+Companion Plotfile...** a server: the one the open plotfile came from when it
+is remote (the dialog keeps that session), else any server, over the window's
+remote session, started from the dialog if there is none. The command line
+form is `amrexplorer --ssh host /data/atmosphere_plt --companion
+/data/ocean_plt`. Plotfiles on two different servers cannot be paired.
+
+In the two panels that show the perpendicular axis, both datasets are drawn
+stacked at their physical positions and aligned along the shared axis, each
+at one raster sample per finest cell. The panel normal to the shared plane
+shows whichever dataset holds the current slice position; moving the position
+across the interface switches it. The position control along the
+perpendicular axis counts the lower dataset's rows then the upper's, and the
+shared axes count cells over the union of the two domains.
+
+A second toolbar row, named after the companion's directory, holds its own
+**Field**, **Level**, and **Range** controls, and the Color Scale panel shows
+one bar per dataset; the palette and **Log** are shared. Tick **Same as
+primary** to colour the companion with the primary's displayed range instead;
+its own range controls and colour bar are then withheld and one scale serves
+both. Velocity vectors are drawn on the primary only. Probing, right-click
+slice moves, and line plots work on whichever dataset is under the pointer.
+**View > Aspect Ratio > Axis Scaling...** offers one factor per dataset along
+the perpendicular axis, so a shallow ocean can be stretched under a tall
+atmosphere, and one factor for each shared axis. A rubber-band selection,
+which may straddle the interface, re-slices each dataset for the part inside
+its own domain and frames the selection; Shift-drag and the arrow keys move
+that window and refresh both; **Sync Rubber-band Zoom** carries the selection's
+extents to the other panels along the axes they share. Wheel zoom and the
+fixed scales act on the view alone. A fixed scale means what it means for the
+open plotfile by itself: in Physical Size its tightest cell is one pixel at
+1x, and a companion with finer cells shows them smaller than a pixel until its
+own factor in **Axis Scaling...** stretches them.
+
+The Expression Editor's definitions reach the companion too, computed
+against its own stored fields: its **Field** list shows the ones it resolves,
+and greys the rest with the reason. Applying a change reloads both datasets,
+and the companion keeps its selected field by name.
+
+While a companion is open the Dataset Metadata panel lists both plotfiles,
+the isometric view outlines both domains in the panels' proportions (so a
+shallow ocean under a tall atmosphere stays visible), and image export composes the
+stacked panels without axes (their two vertical scales differ). Volume
+rendering, particles, the Dataset window, sequences, and the scale bar are
+not available in this mode. Opening any other dataset closes the companion.
 
 ## Volume rendering
 
@@ -384,6 +500,25 @@ match. Its own controls set the opacity:
   the domain over the volume. The outline is on by default and the boxes are
   not: box edges crossing a translucent field read as structure in it, which
   is worth asking for rather than having to switch off.
+- **Isosurface** draws the surface where a field equals one value -- a shaded
+  shell, lit from where you are looking -- inside the volume, in depth order
+  with it, so a translucent volume shows through a translucent surface and a
+  surface hides what is behind it. Tick the group to turn it on. **Field** is
+  the field the surface is taken from, and it need not be the one the volume
+  shows: a density isosurface inside a temperature volume is the usual reason
+  to want one. It starts on a volume-fraction field (`vfrac` or `volfrac`)
+  when the plotfile has one, since that surface at 0.5 is an embedded
+  boundary's geometry; otherwise it starts on the volume's field and follows
+  it until you pick another. **Value** is the iso-value in the field's own
+  units; the slider
+  under it runs over the field's range and starts in the middle, or type a
+  value. **Color** and **Opacity** are the surface's own -- the palette plays
+  no part in it. The color is remembered across sessions; the field and the
+  value belong to a plotfile and start afresh. Dragging a slider shows drafts
+  like a moving camera does.
+- **Show volume** is ticked by default and has a say only while there is an
+  isosurface: clear it to draw the surface alone. The volume's field is then
+  not sampled at all, so a surface of one field costs nothing for the other.
 
 While the camera moves the window shows quick half-resolution drafts and
 renders the full frame once it settles. Rotating and zooming reuse the field
@@ -398,12 +533,16 @@ sends back the picture, never the field. It needs an `amrexplorer-server`
 that speaks protocol 1.2; against an older server the menu item stays
 disabled. **Smooth sampling** needs protocol 1.3, since the server is what
 does the sampling; against a 1.2 server the box is greyed out and says so,
-and the volume is rendered from the nearest voxel.
+and the volume is rendered from the nearest voxel. The **Isosurface** group
+and **Show volume** need protocol 1.6 for the same reason; against an older
+server the group is greyed out and says so, and the volume is drawn alone.
 
 The server's `--max-volume-voxels` and `--volume-cache-mib` options set how
-large one volume and one dataset's cache may get. They are per volume
+large one sampled grid and one dataset's cache may get. They are per grid
 and per dataset, not a total for the server, so sizing a host means multiplying
-them by how many datasets and connections you allow. `--max-volume-voxels`
+them by how many datasets and connections you allow -- and a render with an
+isosurface of a second field holds two grids, so a cache that fits only one
+re-samples the second on every camera move. `--max-volume-voxels`
 starts at the largest a client may ask for, so it is there to tighten a server
 rather than to open one up; a request wanting more than it permits is rendered
 at the lower detail rather than refused.
@@ -549,6 +688,17 @@ between palettes.
 
 Press **B** or choose **View > Boxes** to show AMR grid boundaries.
 
+Choose **View > Scale Bar** to show or hide the length annotation. The option
+is unavailable when the screen does not show the same length per pixel along
+both axes, as with non-square cells in Cell Counts mode. Plotfiles do not declare their
+length unit, so AMReXplorer leaves it unset by default and displays native
+coordinate values in scientific notation. Choose **View > Length Units...** to
+identify the unit used by the plotfile; AMReXplorer can then label the bar in a
+natural physical unit. This setting changes only the annotation, not dataset
+coordinates or geometry. The selection resets to unset whenever you open a new
+dataset or sequence, and is not saved between app sessions. Stepping through
+frames within a sequence keeps the selection.
+
 Choose **View > Contours...** to select one of three display modes:
 
 - **Raster** shows the color-mapped slice only.
@@ -644,37 +794,43 @@ compatible with the previous one.
 
 ## Exporting images and animations
 
-**File > Export Image...** saves the current view as either a PNG display image
-or a float64 FITS data image. PNG export asks whether to include the color
-scale. FITS export writes the displayed scalar samples with `BITPIX=-64`;
-invalid samples are written as NaN. A 2-D export creates one image. A 3-D
-export creates separate `_xy`, `_xz`, and `_yz` images. Both formats reflect
-the current zoomed data region; only PNG includes visible overlays and the
-optional color scale.
+Use **File > Export Image...** to save the current view as PNG or its numerical
+data as FITS. For PNG, choose whether to include the color scale and
+**axes, labels, and ticks**, and select a **White** or **Transparent** background.
 
-For an open plotfile sequence, **File > Export Animation...** writes numbered
-PNG frames. If `ffmpeg` is installed and available on `PATH`, AMReXplorer also
-encodes an MP4. Three-dimensional sequences produce separate output for each
-orthogonal plane.
+For an open plotfile sequence, use **File > Export Animation...** to save PNG
+frames with the same options. Install FFmpeg to also create an MP4 movie.
+Transparency is available only for PNG, not MP4.
 
 ## Panels, preferences, and diagnostics
 
 The **View** menu controls these optional panels:
 
-- **Dataset Metadata** shows plotfile geometry, levels, variables, and related
-  metadata.
+- **Dataset Metadata** shows the plotfile's format, time, coordinate system,
+  physical domain, fields, and for each level its grid count, cell counts,
+  index domain, cell sizes, refinement ratio, and step.
 - **Color Scale** shows the current numeric range and palette.
 - **Diagnostics** reports request, I/O, and cache activity.
 - **Animation** contains plane-sweep and sequence controls.
 - **FAB Selector** lists raw FAB records or the FABs belonging to an open
   standalone MultiFab.
 
-Window geometry, logarithmic mapping, palette, number format, and animation
-speed persist across sessions.
+**View > Skin** chooses the application's appearance. **System** (the default)
+keeps whatever the desktop provides; **Light** and **Dark** apply
+AMReXplorer's own; and **Blue**, **Green** and **Maroon** are Dark in a tint,
+Blue being the application icon's own colors. The change takes effect at once
+and applies to every open window. The image viewports and the color scale keep
+their neutral gray under every skin, so a colormap looks the same whichever
+one you pick.
+
+Window geometry, logarithmic mapping, palette, skin, number format,
+animation speed, aspect ratio proportion, and the isosurface color persist
+across sessions.
 
 Each open dataset has a 1 GiB data cache by default, and volume rendering fills
-a second cache of the same size with the grids it samples the field into, so a
-dataset you have volume-rendered can hold up to twice that. Closing the volume
+a second cache of the same size with the grids it samples the field into (an
+isosurface of a second field holds a second grid there), so a dataset you have
+volume-rendered can hold up to twice that. Closing the volume
 window does not give that memory back -- the grids stay cached for as long as
 the dataset is open, so that reopening the window draws immediately. Set
 `AMREXPLORER_CACHE_SIZE_MB` to a positive number of MiB before launching to

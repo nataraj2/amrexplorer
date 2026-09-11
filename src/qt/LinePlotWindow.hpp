@@ -5,6 +5,7 @@
 
 #include <QColor>
 #include <QPoint>
+#include <QRect>
 #include <QRectF>
 #include <QString>
 #include <QWidget>
@@ -57,6 +58,9 @@ public:
     void resetZoom();
     // Toggles per-sample data markers over each curve (legacy Amrvis style).
     void setShowMarkers(bool on);
+    // The data area inside the axes. Its insets follow the tick labels of the
+    // last paint, so callers mapping data to pixels have to ask for it.
+    [[nodiscard]] QRect plotRect() const;
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -66,17 +70,24 @@ protected:
     void leaveEvent(QEvent* event) override;
 
 private:
-    [[nodiscard]] QRect plotRect() const;
-    [[nodiscard]] std::optional<QRectF> automaticRange() const;
-    [[nodiscard]] std::optional<QRectF> displayedRange() const;
+    // Store endpoints: a QRectF height cannot represent [-1e308, 1e308].
+    struct PlotRange {
+        double xMinimum;
+        double xMaximum;
+        double yMinimum;
+        double yMaximum;
+    };
+
+    [[nodiscard]] std::optional<PlotRange> automaticRange() const;
+    [[nodiscard]] std::optional<PlotRange> displayedRange() const;
     [[nodiscard]] QString hoverTextAt(const QPointF& position) const;
     void hideHover();
 
     const std::vector<LinePlotCurve>* m_curves = nullptr;
     QString m_numberFormat;
     bool m_showMarkers = false;
-    std::optional<QRectF> m_zoom;
-    std::optional<QRectF> m_paintedRange;
+    std::optional<PlotRange> m_zoom;
+    std::optional<PlotRange> m_paintedRange;
     QPoint m_pressPosition;
     QRubberBand* m_rubberBand = nullptr;
     bool m_dragging = false;

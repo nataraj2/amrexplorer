@@ -4,6 +4,7 @@
 #include "CloseWindowAction.hpp"
 #include "CurrentRowBulletDelegate.hpp"
 
+#include <limits>
 #include <amrexplorer/core/Version.hpp>
 
 #include <QKeySequence>
@@ -37,6 +38,13 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_paletteController, &PaletteController::loadFileRequested, this,
         [this] { loadPaletteFile(); });
 
+    // The skin is application-wide, so this is built first: constructing it
+    // snapshots the desktop's style and palette, which restoreSettings may
+    // then replace. skinChanged only persists, so it is safe to wire here.
+    m_themeController = new ThemeController(this);
+    connect(m_themeController, &ThemeController::skinChanged, this,
+        [this] { saveSettings(); });
+
     // Derived fields: the controller owns this window's definition list and
     // its editor. It asks the window for the fields a definition may read (the
     // open dataset's stored ones) and for the reload that installs a committed
@@ -51,7 +59,7 @@ MainWindow::MainWindow(QWidget* parent)
                 // what that entry describes -- a synthesised metadata, or one
                 // record of a multi-record file -- is not what re-reading the
                 // path produces.
-                if (!m_dataset) {
+                if (!primary().session) {
                     return tr("Derived fields need an open dataset.");
                 }
                 // Asked before the shape of the next load, because
@@ -60,18 +68,18 @@ MainWindow::MainWindow(QWidget* parent)
                 // that with the FAB wording below tells the user their dataset
                 // is something it is not, which is the lie this reason exists
                 // to remove. The one case a user can act on is checked first.
-                if (!m_dataset->supportsDerivedFields()) {
+                if (!primary().session->supportsDerivedFields()) {
                     // A remote session says so in the words both layers share;
                     // anything else cannot compute fields at all.
                     return std::dynamic_pointer_cast<
-                               remote::RemoteDatasetSession>(m_dataset)
+                               remote::RemoteDatasetSession>(primary().session)
                         ? tr(remote::derivedFieldsUnsupportedMessage)
                         : tr("This dataset cannot compute fields.");
                 }
                 // Both FABs, not just the drilled one: a standalone FAB opened
                 // straight from a file reopens no better than one drilled out
                 // of a MultiFab.
-                if (m_dataset->metadata().isFab
+                if (primary().session->metadata().isFab
                     || m_fabNavigator->fabMode()) {
                     return tr("Derived fields are not available for a FAB.");
                 }
@@ -109,10 +117,10 @@ MainWindow::MainWindow(QWidget* parent)
                     // material tells the user they may write against them,
                     // and the refusal then comes from somewhere else
                     // entirely. available() is that one question, asked once.
-                    if (!m_dataset || !m_derivedFields->available()) {
+                    if (!primary().session || !m_derivedFields->available()) {
                         return names;
                     }
-                    const auto& fields = m_dataset->metadata().fields;
+                    const auto& fields = primary().session->metadata().fields;
                     // The stored ones alone. The derived tail is what the
                     // editor is for writing, and offering it back as material
                     // would suggest a definition may read one written below
@@ -127,10 +135,10 @@ MainWindow::MainWindow(QWidget* parent)
                 },
             .datasetShape =
                 [this] {
-                    if (!m_dataset || !m_derivedFields->available()) {
+                    if (!primary().session || !m_derivedFields->available()) {
                         return QString{};
                     }
-                    const auto& metadata = m_dataset->metadata();
+                    const auto& metadata = primary().session->metadata();
                     // The centerings as well as the geometry: two plotfiles
                     // can share every field name and still resolve an
                     // expression differently, because installation refuses one
@@ -156,7 +164,7 @@ MainWindow::MainWindow(QWidget* parent)
                     // field as stored, so every definition resolves and the
                     // editor would report that it works -- right up until
                     // Apply refuses it for a reason of its own.
-                    if (!m_dataset || !m_derivedFields->available()) {
+                    if (!primary().session || !m_derivedFields->available()) {
                         return skipped;
                     }
                     // Only what installDerivedFields consults, which is
@@ -176,7 +184,7 @@ MainWindow::MainWindow(QWidget* parent)
                     // appends what it resolves -- handing it a list that
                     // already holds the last installation's fields would
                     // resolve every definition against itself.
-                    const auto& open = m_dataset->metadata();
+                    const auto& open = primary().session->metadata();
                     const auto stored = storedFieldCount();
                     DatasetMetadata metadata;
                     metadata.dimension = open.dimension;
@@ -208,6 +216,8 @@ MainWindow::MainWindow(QWidget* parent)
     // wireframe bottom-right).
     m_stack = new QStackedWidget(this);
 
+    // The primary layer is always present; a companion joins it later.
+    primary().active = true;
     m_view2d.normal = 1;
     m_view2d.label = QStringLiteral("2-D");
     m_view2d.view = new ImageView(m_stack);
@@ -225,7 +235,7 @@ MainWindow::MainWindow(QWidget* parent)
     constexpr std::array<const char*, 3> vAxis{"Z", "Z", "Y"};
     for (int normal = 0; normal < 3; ++normal) {
         const auto idx = static_cast<std::size_t>(normal);
-        auto& state = m_planeViews[idx];
+        auto& state = primary().planeViews[idx];
         state.normal = normal;
         state.label = QString::fromLatin1(viewLabels[idx]);
         state.view = new ImageView(gridPage);
@@ -238,9 +248,9 @@ MainWindow::MainWindow(QWidget* parent)
     }
     m_isoWidget = new IsoWidget(gridPage);
     m_isoWidget->setColorPalette(&m_paletteController->palette());
-    gridLayout->addWidget(m_planeViews[2].view, 0, 0);  // XY: plane normal to Z
-    gridLayout->addWidget(m_planeViews[1].view, 0, 1);  // XZ: plane normal to Y
-    gridLayout->addWidget(m_planeViews[0].view, 1, 0);  // YZ: plane normal to X
+    gridLayout->addWidget(primary().planeViews[2].view, 0, 0);  // XY: plane normal to Z
+    gridLayout->addWidget(primary().planeViews[1].view, 0, 1);  // XZ: plane normal to Y
+    gridLayout->addWidget(primary().planeViews[0].view, 1, 0);  // YZ: plane normal to X
     gridLayout->addWidget(m_isoWidget, 1, 1);
     gridLayout->setColumnStretch(0, 1);
     gridLayout->setColumnStretch(1, 1);
@@ -254,20 +264,20 @@ MainWindow::MainWindow(QWidget* parent)
     auto* sliceToolbar = m_sliceToolbar;
     sliceToolbar->setMovable(false);
     sliceToolbar->addWidget(new QLabel(tr("Field:"), sliceToolbar));
-    m_fieldSelector = new QComboBox(sliceToolbar);
-    m_fieldSelector->setObjectName(QStringLiteral("fieldSelector"));
-    m_fieldSelector->setMinimumContentsLength(10);
-    m_fieldSelector->view()->setItemDelegate(new CurrentRowBulletDelegate(
-        m_fieldSelector, m_fieldSelector->view()));
-    sliceToolbar->addWidget(m_fieldSelector);
+    primary().fieldSelector = new QComboBox(sliceToolbar);
+    primary().fieldSelector->setObjectName(QStringLiteral("fieldSelector"));
+    primary().fieldSelector->setMinimumContentsLength(10);
+    primary().fieldSelector->view()->setItemDelegate(new CurrentRowBulletDelegate(
+        primary().fieldSelector, primary().fieldSelector->view()));
+    sliceToolbar->addWidget(primary().fieldSelector);
     sliceToolbar->addSeparator();
     sliceToolbar->addWidget(new QLabel(tr("Level:"), sliceToolbar));
-    m_levelSelector = new QComboBox(sliceToolbar);
-    m_levelSelector->setObjectName(QStringLiteral("levelSelector"));
-    m_levelSelector->setMinimumContentsLength(8);
-    m_levelSelector->view()->setItemDelegate(new CurrentRowBulletDelegate(
-        m_levelSelector, m_levelSelector->view()));
-    sliceToolbar->addWidget(m_levelSelector);
+    primary().levelSelector = new QComboBox(sliceToolbar);
+    primary().levelSelector->setObjectName(QStringLiteral("levelSelector"));
+    primary().levelSelector->setMinimumContentsLength(8);
+    primary().levelSelector->view()->setItemDelegate(new CurrentRowBulletDelegate(
+        primary().levelSelector, primary().levelSelector->view()));
+    sliceToolbar->addWidget(primary().levelSelector);
     sliceToolbar->addSeparator();
     // 3-D shared slice positions: one compact spinbox per axis. The whole
     // group stays hidden for 2-D datasets.
@@ -287,17 +297,26 @@ MainWindow::MainWindow(QWidget* parent)
         m_sliceSpinboxes[static_cast<std::size_t>(axis)] = spin;
         connect(spin, qOverload<int>(&QSpinBox::valueChanged),
             this, [this, axis](int index) {
-                if (!m_controlsReady || !m_dataset
-                    || m_dataset->metadata().dimension != 3) {
+                if (!m_controlsReady || !primary().session
+                    || primary().session->metadata().dimension != 3) {
+                    return;
+                }
+                if (m_pair) {
+                    // Two datasets: the perpendicular axis counts the lower
+                    // layer's finest rows then the upper's; a shared axis
+                    // counts the union at the reference cell size.
+                    setSlicePosition(axis, axis == m_pair->perpendicularAxis
+                        ? m_pair->positionForStackedIndex(index)
+                        : m_pair->positionForUnionIndex(axis, index));
                     return;
                 }
                 const auto level = sliceIndexLevel();
                 if (level < 0 || static_cast<std::size_t>(level)
-                    >= m_dataset->metadata().levels.size()) {
+                    >= primary().session->metadata().levels.size()) {
                     return;
                 }
                 setSlicePosition(axis, positionForSliceIndex(
-                    m_dataset->metadata(), level, axis, index));
+                    primary().session->metadata(), level, axis, index));
             });
     }
     sliceToolbar->addWidget(m_slicePositionControls);
@@ -367,11 +386,84 @@ MainWindow::MainWindow(QWidget* parent)
     // The range mode, User min/max and Log, and the per-field memory behind
     // them; the separator before Log matches the per-group separators on the
     // Slice Controls toolbar, as does the one before Palette below.
-    m_range = new RangeController(this);
-    m_range->createToolbarWidgets(rangeToolbar);
+    primary().range = new RangeController(this);
+    primary().range->createToolbarWidgets(rangeToolbar);
     rangeToolbar->addSeparator();
     rangeToolbar->addWidget(new QLabel(tr("Palette:"), rangeToolbar));
     rangeToolbar->addWidget(m_paletteController->createSelector(rangeToolbar));
+
+    // A companion dataset's controls: its own Field and Level, and its own
+    // range mode and bounds. Shown only while a companion is open (see
+    // MainWindowCompanion.cpp). Log is shared, so its checkbox is withheld
+    // here and follows the primary's.
+    addToolBarBreak(Qt::TopToolBarArea);
+    m_companionToolbar = addToolBar(tr("Companion Controls"));
+    m_companionToolbar->setMovable(false);
+    m_companionToolbar->setObjectName(QStringLiteral("companionToolbar"));
+    auto& companion = m_layers[1];
+    m_companionLabel = new QLabel(tr("Companion:"), m_companionToolbar);
+    m_companionLabel->setObjectName(QStringLiteral("companionLabel"));
+    m_companionToolbar->addWidget(m_companionLabel);
+    m_companionToolbar->addSeparator();
+    m_companionToolbar->addWidget(new QLabel(tr("Field:"), m_companionToolbar));
+    companion.fieldSelector = new QComboBox(m_companionToolbar);
+    companion.fieldSelector->setObjectName(QStringLiteral("companionFieldSelector"));
+    companion.fieldSelector->setMinimumContentsLength(10);
+    m_companionToolbar->addWidget(companion.fieldSelector);
+    m_companionToolbar->addSeparator();
+    m_companionToolbar->addWidget(new QLabel(tr("Level:"), m_companionToolbar));
+    companion.levelSelector = new QComboBox(m_companionToolbar);
+    companion.levelSelector->setObjectName(QStringLiteral("companionLevelSelector"));
+    companion.levelSelector->setMinimumContentsLength(8);
+    m_companionToolbar->addWidget(companion.levelSelector);
+    m_companionToolbar->addSeparator();
+    m_companionToolbar->addWidget(new QLabel(tr("Range:"), m_companionToolbar));
+    companion.range = new RangeController(this);
+    companion.range->createToolbarWidgets(m_companionToolbar, QStringLiteral("companion"));
+    companion.range->setLogarithmicVisible(false);
+    // No separator of its own: the range widgets end with the one before the
+    // (hidden) Log box, which now stands before this.
+    m_companionFollowBox = new QCheckBox(tr("Same as primary"), m_companionToolbar);
+    m_companionFollowBox->setObjectName(QStringLiteral("companionFollowPrimary"));
+    m_companionFollowBox->setToolTip(tr(
+        "Colour the companion with the primary's displayed range and show one "
+        "colour scale"));
+    m_companionToolbar->addWidget(m_companionFollowBox);
+    connect(m_companionFollowBox, &QCheckBox::toggled, this,
+        [this](bool checked) { setCompanionFollowsPrimary(checked); });
+    m_companionToolbar->setVisible(false);
+    connect(companion.fieldSelector, qOverload<int>(&QComboBox::currentIndexChanged),
+        this, [this](int index) {
+            auto& layer = m_layers[1];
+            // The separator and a greyed definition carry no field id; only
+            // a row that does is a field switch (see selectFieldItem).
+            if (!layer.active || index < 0
+                || !layer.fieldSelector->itemData(index).isValid()) {
+                return;
+            }
+            layer.range->switchField(layer.fieldSelector->itemText(index));
+            layer.pendingRangeStore.reset();
+            updateRangeModeAvailability(layer);
+            scheduleLayerSliceRequests(layer);
+        });
+    connect(companion.levelSelector, qOverload<int>(&QComboBox::currentIndexChanged),
+        this, [this](int) {
+            auto& layer = m_layers[1];
+            layer.pendingRangeStore.reset();
+            updateRangeModeAvailability(layer);
+            scheduleLayerSliceRequests(layer);
+        });
+    connect(companion.range, &RangeController::modeChanged, this, [this] {
+        m_layers[1].pendingRangeStore.reset();
+        updateRangeModeAvailability(m_layers[1]);
+        scheduleLayerSliceRequests(m_layers[1]);
+    });
+    connect(companion.range, &RangeController::userRangeChanged, this,
+        [this] { scheduleLayerSliceRequests(m_layers[1]); });
+    connect(companion.range, &RangeController::statusMessage, this,
+        [this](const QString& message, int timeout) {
+            statusBar()->showMessage(message, timeout);
+        });
 
     m_sliceDebounce = new QTimer(this);
     m_sliceDebounce->setSingleShot(true);
@@ -381,55 +473,55 @@ MainWindow::MainWindow(QWidget* parent)
     m_panDebounce->setSingleShot(true);
     m_panDebounce->setInterval(120);
     connect(m_panDebounce, &QTimer::timeout, this, [this] { flushPanDrag(false); });
-    connect(m_fieldSelector, qOverload<int>(&QComboBox::currentIndexChanged),
+    connect(primary().fieldSelector, qOverload<int>(&QComboBox::currentIndexChanged),
         this, [this](int index) {
             // Swap the per-field range snapshot before re-slicing. This only
             // fires on a real user selection -- per-frame repopulation during
             // animation blocks signals and preserves the index, so the range
             // stays constant across frames.
             if (m_controlsReady && index >= 0) {
-                m_range->switchField(m_fieldSelector->itemText(index));
+                primary().range->switchField(primary().fieldSelector->itemText(index));
             }
-            // A deferred full-domain range store (m_pendingRangeStore) is keyed
+            // A deferred full-domain range store (pendingRangeStore) is keyed
             // to the field/level/mode in effect when it was queued. Changing any
             // of them means a completing 3-D Visible sync would store its union
             // under the wrong key, so drop the pending store here (the sync
             // completion also re-checks the key; see range-cache-staleness-races).
-            m_pendingRangeStore.reset();
+            primary().pendingRangeStore.reset();
             updateRangeModeAvailability();
             scheduleSliceRequest();
             m_volumeController->refresh();
         });
-    connect(m_levelSelector, qOverload<int>(&QComboBox::currentIndexChanged),
+    connect(primary().levelSelector, qOverload<int>(&QComboBox::currentIndexChanged),
         this, [this](int) {
             configureSlicePositionControls();
-            m_pendingRangeStore.reset();  // see the field selector above
+            primary().pendingRangeStore.reset();  // see the field selector above
             updateRangeModeAvailability();
             scheduleSliceRequest();
             m_volumeController->refresh();
         });
-    connect(m_range, &RangeController::modeChanged, this, [this] {
-        m_pendingRangeStore.reset();  // see the field selector above
+    connect(primary().range, &RangeController::modeChanged, this, [this] {
+        primary().pendingRangeStore.reset();  // see the field selector above
         updateRangeModeAvailability();
         scheduleSliceRequest();
         m_volumeController->refresh();
     });
-    connect(m_range, &RangeController::userRangeChanged, this,
+    connect(primary().range, &RangeController::userRangeChanged, this,
         [this] {
             scheduleSliceRequest();
             m_volumeController->refresh();
         });
-    connect(m_range, &RangeController::logarithmicChanged, this,
+    connect(primary().range, &RangeController::logarithmicChanged, this,
         [this] {
             scheduleSliceRequest();
             m_volumeController->refresh();
         });
-    connect(m_range, &RangeController::statusMessage, this,
+    connect(primary().range, &RangeController::statusMessage, this,
         [this](const QString& message, int timeoutMs) {
             statusBar()->showMessage(message, timeoutMs);
         });
-    m_fieldSelector->setEnabled(false);
-    m_levelSelector->setEnabled(false);
+    primary().fieldSelector->setEnabled(false);
+    primary().levelSelector->setEnabled(false);
 
     m_metadataDock = new QDockWidget(tr("Dataset Metadata"), this);
     m_metadataTree = new QTreeWidget(m_metadataDock);
@@ -450,7 +542,7 @@ MainWindow::MainWindow(QWidget* parent)
             [this] { return m_closing; },
             [this]() -> std::optional<std::string> {
                 if (auto remoteSession = std::dynamic_pointer_cast<
-                        remote::RemoteDatasetSession>(m_dataset)) {
+                        remote::RemoteDatasetSession>(primary().session)) {
                     return remoteSession->remotePath();
                 }
                 return std::nullopt;
@@ -468,6 +560,8 @@ MainWindow::MainWindow(QWidget* parent)
                 openRemoteDataset(paths.front());
             }
         });
+    connect(m_remoteSession, &RemoteSessionController::companionRequested, this,
+        [this](std::string path) { openRemoteCompanion(std::move(path)); });
     connect(m_remoteSession, &RemoteSessionController::statusMessage, this,
         [this](const QString& message, int timeoutMs) {
             statusBar()->showMessage(message, timeoutMs);
@@ -489,8 +583,19 @@ MainWindow::MainWindow(QWidget* parent)
     addDockWidget(Qt::BottomDockWidgetArea, m_diagnosticsDock);
 
     m_colorBarDock = new QDockWidget(tr("Color Scale"), this);
-    m_colorBar = new ColorBarWidget(m_colorBarDock);
-    m_colorBarDock->setWidget(m_colorBar);
+    // Both layers' bars, the companion's below the primary's and hidden
+    // until a companion is open.
+    auto* colorBars = new QWidget(m_colorBarDock);
+    auto* colorBarLayout = new QVBoxLayout(colorBars);
+    colorBarLayout->setContentsMargins(0, 0, 0, 0);
+    colorBarLayout->setSpacing(4);
+    primary().colorBar = new ColorBarWidget(colorBars);
+    colorBarLayout->addWidget(primary().colorBar);
+    m_layers[1].colorBar = new ColorBarWidget(colorBars);
+    m_layers[1].colorBar->setObjectName(QStringLiteral("companionColorBar"));
+    m_layers[1].colorBar->setVisible(false);
+    colorBarLayout->addWidget(m_layers[1].colorBar);
+    m_colorBarDock->setWidget(colorBars);
     addDockWidget(Qt::RightDockWidgetArea, m_colorBarDock);
 
     m_animationDock = new QDockWidget(tr("Animation"), this);
@@ -610,7 +715,7 @@ MainWindow::MainWindow(QWidget* parent)
     // its diagnostics.
     m_particleController = new ParticleController(
         ParticleController::Hooks{
-            [this] { return m_dataset; },
+            [this] { return primary().session; },
             [this] { return m_closing; },
         },
         this);
@@ -649,22 +754,22 @@ MainWindow::MainWindow(QWidget* parent)
     // diagnostics.
     m_volumeController = new VolumeController(
         VolumeController::Hooks{
-            [this] { return m_dataset; },
+            [this] { return primary().session; },
             [this]() -> std::optional<std::pair<FieldId, QString>> {
-                if (!m_dataset || m_fieldSelector->currentIndex() < 0) {
+                if (!primary().session || primary().fieldSelector->currentIndex() < 0) {
                     return std::nullopt;
                 }
-                return std::pair{FieldId{m_fieldSelector->currentData().toUInt()},
-                    m_fieldSelector->currentText()};
+                return std::pair{FieldId{primary().fieldSelector->currentData().toUInt()},
+                    primary().fieldSelector->currentText()};
             },
             [this] {
                 // The live session, as every other decodeLevelData caller
-                // does: m_openMetadata is the open-time snapshot and lags it
+                // does: primary().openMetadata is the open-time snapshot and lags it
                 // for the whole of each sequence frame's install.
-                return decodeLevelData(m_levelSelector->currentData().toInt(),
-                    m_dataset ? m_dataset->metadata().finestLevel : 0);
+                return decodeLevelData(primary().levelSelector->currentData().toInt(),
+                    primary().session ? primary().session->metadata().finestLevel : 0);
             },
-            [this] { return m_range->selection(); },
+            [this] { return primary().range->selection(); },
             [this]() -> const Palette& { return m_paletteController->palette(); },
             [this] { return m_slicePosition3d; },
             [this] { return m_slicePlanesAction->isChecked(); },
@@ -682,13 +787,13 @@ MainWindow::MainWindow(QWidget* parent)
                 // anything. Reading it meant the box stayed at the whole
                 // domain after the most ordinary way of zooming in, so the
                 // check box appeared to do nothing.
-                const auto domain = m_dataset
-                    ? datasetSampleBounds(m_dataset->metadata())
+                const auto domain = primary().session
+                    ? datasetSampleBounds(primary().session->metadata())
                     : RealBox{};
                 std::array<std::optional<RealBox>, 3> regions{};
-                for (std::size_t index = 0; index < m_planeViews.size();
+                for (std::size_t index = 0; index < primary().planeViews.size();
                     ++index) {
-                    const auto& state = m_planeViews[index];
+                    const auto& state = primary().planeViews[index];
                     if (state.view == nullptr || !state.view->hasImage()
                         || state.plane->width <= 0
                         || state.plane->height <= 0) {
@@ -707,6 +812,21 @@ MainWindow::MainWindow(QWidget* parent)
                 return volumeVisibleRegion(domain, regions);
             },
             [this] { return m_playbackMode == PlaybackMode::Sequence; },
+            [this] {
+                // The field selector's rows, derived fields included; a row
+                // without an id (a heading) is not a field.
+                std::vector<std::pair<FieldId, QString>> fields;
+                for (int row = 0; row < primary().fieldSelector->count(); ++row) {
+                    const auto rowData = primary().fieldSelector->itemData(row);
+                    if (!rowData.isValid()) {
+                        continue;
+                    }
+                    fields.emplace_back(
+                        FieldId{rowData.toUInt()}, primary().fieldSelector->itemText(row));
+                }
+                return fields;
+            },
+            [] { return makeSettingsPtr(); },
         },
         this);
     connect(m_volumeController, &VolumeController::renderActivityChanged, this,
@@ -728,8 +848,8 @@ MainWindow::MainWindow(QWidget* parent)
         this, [this](int index) {
             m_animationPanel->setSequenceFrame(index);
             m_animationPanel->setSequenceInfo(
-                QString::fromStdString(m_datasetPath.filename().string()),
-                m_openMetadata->time);
+                datasetDisplayName(m_datasetPath),
+                primary().openMetadata->time);
             updateDiagnostics();
             emit sequenceFrameDisplayed(index);
         });
@@ -746,7 +866,7 @@ MainWindow::MainWindow(QWidget* parent)
             // nothing, so the memo must not remember it as asked: the epoch
             // has not moved, and without the clear the next load could not ask
             // either.
-            m_reloadAskedFor = {m_derivedFields->definitions(), m_sessionEpoch};
+            m_reloadAskedFor = {m_derivedFields->definitions(), primary().sessionEpoch};
             // Stop playing. Playback wraps, so without this it comes back to
             // the same unreadable frame -- or the same disconnected server --
             // every cycle, raising a diagnostic each time. The user is left on
@@ -772,29 +892,31 @@ MainWindow::MainWindow(QWidget* parent)
     // exporter owns the whole export state machine; this window supplies
     // frame rendering and navigation, and restores its UI on finished().
     m_animationExporter = new AnimationExporter(
-        [this](bool includeColorBar, qreal scale) {
+        [this](const ExportOptions& options, qreal scale,
+               std::map<QString, ExportLayout>& layouts) {
             std::vector<std::pair<QString, QImage>> frames;
             if (m_viewDimension == 3) {
                 constexpr std::array<const char*, 3> suffixes{
                     "_yz", "_xz", "_xy"};
                 for (int normal = 0; normal < 3; ++normal) {
                     const auto idx = static_cast<std::size_t>(normal);
-                    auto* panelView = m_planeViews[idx].view;
+                    auto* panelView = primary().planeViews[idx].view;
                     if (panelView == nullptr || !panelView->hasImage()) {
                         continue;
                     }
-                    frames.emplace_back(QString::fromLatin1(suffixes[idx]),
-                        composeExportFrame(panelView, includeColorBar, scale));
+                    const auto suffix = QString::fromLatin1(suffixes[idx]);
+                    frames.emplace_back(
+                        suffix, composeExportFrame(panelView, options, scale, &layouts[suffix]));
                 }
             } else {
-                frames.emplace_back(QString(), composeExportFrame(
-                    m_activeView != nullptr ? m_activeView->view : nullptr,
-                    includeColorBar, scale));
+                frames.emplace_back(
+                    QString(),
+                    composeExportFrame(m_activeView != nullptr ? m_activeView->view : nullptr,
+                                       options, scale, &layouts[QString()]));
             }
             return frames;
         },
-        [this](int index) { goToSequenceFrame(index); },
-        this);
+        [this](int index) { goToSequenceFrame(index); }, this);
     connect(m_animationExporter, &AnimationExporter::encodingStarted,
         this, &MainWindow::exportEncodingStarted);
     connect(m_animationExporter, &AnimationExporter::finished, this,
@@ -838,26 +960,55 @@ MainWindow::MainWindow(QWidget* parent)
 
     createMenus();
 
-    connect(m_fieldSelector, qOverload<int>(&QComboBox::currentIndexChanged),
+    connect(primary().fieldSelector, qOverload<int>(&QComboBox::currentIndexChanged),
         this, [this](int) {
             syncMenuChecks();
             syncVariableMenu();
         });
-    connect(m_levelSelector, qOverload<int>(&QComboBox::currentIndexChanged),
+    connect(primary().levelSelector, qOverload<int>(&QComboBox::currentIndexChanged),
         this, [this](int) { syncMenuChecks(); });
     // No saveSettings here: range mode is deliberately not persisted (see
     // saveSettings), so the call only ever rewrote unrelated keys.
-    connect(m_range, &RangeController::logarithmicChanged, this,
-        [this] { saveSettings(); });
+    connect(primary().range, &RangeController::logarithmicChanged, this,
+        [this] {
+            saveSettings();
+            // Shared with the companion, whose own checkbox is withheld.
+            auto& layer = m_layers[1];
+            if (layer.active) {
+                auto selection = layer.range->selection();
+                selection.logarithmic = primary().range->logarithmic();
+                layer.range->setSelection(selection);
+                scheduleLayerSliceRequests(layer);
+            }
+        });
 
-    wireView(m_view2d);
-    for (auto& state : m_planeViews) {
-        wireView(state);
+    wirePanelSignals(m_view2d.view, -1);
+    wireTileSignals(m_view2d);
+    for (auto& state : primary().planeViews) {
+        wirePanelSignals(state.view, state.normal);
+        wireTileSignals(state);
+    }
+    // The companion layer's states share the panels' views; their tile-level
+    // wiring is installed here too so opening a companion has nothing to wire.
+    for (int normal = 0; normal < 3; ++normal) {
+        auto& companionState = m_layers[1].planeViews[static_cast<std::size_t>(normal)];
+        const auto& reference = primary().planeViews[static_cast<std::size_t>(normal)];
+        companionState.view = reference.view;
+        companionState.normal = normal;
+        companionState.label = reference.label;
+        companionState.layer = 1;
+        companionState.tile = 1;
+        wireTileSignals(companionState);
     }
 
     m_probeLabel = new QLabel(statusBar());
+    m_remotePrecisionLabel = new QLabel(statusBar());
+    m_remotePrecisionLabel->setObjectName(
+        QStringLiteral("remotePrecisionLabel"));
+    m_remotePrecisionLabel->setVisible(false);
     statusBar()->addPermanentWidget(
         m_particleController->createProgress(statusBar()));
+    statusBar()->addPermanentWidget(m_remotePrecisionLabel);
     statusBar()->addPermanentWidget(m_probeLabel);
     statusBar()->showMessage(tr("No dataset open"));
     updateDiagnostics();
@@ -887,33 +1038,90 @@ MainWindow::MainWindow(QWidget* parent)
 
 MainWindow::~MainWindow() = default;
 
-void MainWindow::wireView(PlaneViewState& state)
+void MainWindow::wireTileSignals(PlaneViewState& state)
 {
     auto* view = state.view;
+    // Tile-addressed: every layer's state hears these and keeps its own.
+    const auto tile = static_cast<int>(state.tile);
+    connect(view, &ImageView::tileProbeClicked, this,
+        [this, &state, tile](int hit, int x, int displayY) {
+            if (hit == tile) {
+                probeClicked(state, x, displayY);
+            }
+        });
+    connect(view, &ImageView::tileProbeMoved, this,
+        [this, &state, tile](int hit, int x, int displayY) {
+            if (hit == tile) {
+                probeMoved(state, x, displayY);
+            }
+        });
+    connect(view, &ImageView::tileLinePlotRequested, this,
+        [this, &state, tile](int hit, int x, int y, Qt::MouseButton button) {
+            if (hit == tile) {
+                linePlotRequested(state, x, y, button);
+            }
+        });
+    connect(view, &ImageView::tileSliceMoveRequested, this,
+        [this, &state, tile](int hit, int x, int y, Qt::MouseButton button) {
+            if (hit == tile) {
+                sliceMoveRequested(state, x, y, button);
+            }
+        });
+}
+
+void MainWindow::wirePanelSignals(ImageView* view, int normal)
+{
     view->setFocusPolicy(Qt::StrongFocus);
-    connect(view, &ImageView::probeClicked, this,
-        [this, &state](int x, int displayY) { probeClicked(state, x, displayY); });
-    connect(view, &ImageView::probeMoved, this,
-        [this, &state](int x, int displayY) { probeMoved(state, x, displayY); });
+    // The states this panel draws: the 2-D view's one, or one per active
+    // layer in 3-D. Looked up at signal time, so a companion opened later is
+    // reached without rewiring.
+    const auto states = [this, normal] {
+        return normal < 0 ? std::vector<PlaneViewState*>{&m_view2d}
+                          : statesForPanel(normal);
+    };
+    // Rubber-band zoom and panning are panel-wide gestures; the primary
+    // layer's state carries them and the sync loops reach the others.
+    const auto leading = [states]() -> PlaneViewState* {
+        const auto all = states();
+        return all.empty() ? nullptr : all.front();
+    };
     connect(view, &ImageView::rubberBandSelected, this,
-        [this, &state](const QRectF& sceneRect) { rubberBandZoom(state, sceneRect); });
-    connect(view, &ImageView::panDragBegan, this,
-        [this, &state] { beginPanDrag(state); });
+        [this, leading](const QRectF& sceneRect) {
+            if (m_pair) {
+                return;  // the scene form below handles two datasets
+            }
+            if (auto* state = leading()) {
+                rubberBandZoom(*state, sceneRect);
+            }
+        });
+    // Over two datasets a selection may span both tiles: each layer gets
+    // the part inside its own domain and re-slices for it (pairRubberBandZoom).
+    connect(view, &ImageView::rubberBandSelectedScene, this,
+        [this, leading](const QRectF& sceneRect) {
+            if (!m_pair) {
+                return;
+            }
+            if (auto* state = leading()) {
+                setActiveView(*state);
+                pairRubberBandZoom(state->normal, sceneRect);
+            }
+        });
+    connect(view, &ImageView::panDragBegan, this, [this, leading] {
+        if (auto* state = leading()) {
+            beginPanDrag(*state);
+        }
+    });
     connect(view, &ImageView::panDragMoved, this,
-        [this, &state](const QPointF& totalSceneDelta, const QPoint& viewportDelta) {
-            updatePanDrag(state, totalSceneDelta, viewportDelta);
+        [this, leading](const QPointF& totalSceneDelta, const QPoint& viewportDelta) {
+            if (auto* state = leading()) {
+                updatePanDrag(*state, totalSceneDelta, viewportDelta);
+            }
         });
     connect(view, &ImageView::panDragEnded, this,
-        [this, &state](const QPointF& totalSceneDelta) {
-            endPanDrag(state, totalSceneDelta);
-        });
-    connect(view, &ImageView::linePlotRequested, this,
-        [this, &state](int x, int y, Qt::MouseButton button) {
-            linePlotRequested(state, x, y, button);
-        });
-    connect(view, &ImageView::sliceMoveRequested, this,
-        [this, &state](int x, int y, Qt::MouseButton button) {
-            sliceMoveRequested(state, x, y, button);
+        [this, leading](const QPointF& totalSceneDelta) {
+            if (auto* state = leading()) {
+                endPanDrag(*state, totalSceneDelta);
+            }
         });
     // A wheel zoom demotes the view to Custom on its own; without this the
     // Scale button kept reading "32x" over a view that was no longer applying
@@ -931,45 +1139,62 @@ void MainWindow::wireView(PlaneViewState& state)
             m_volumeController->regionChanged();
         });
     connect(view, &ImageView::fitRequested, this,
-        [this, &state] {
-            resetViewZoom(state);
+        [this, states] {
+            for (auto* state : states()) {
+                resetViewZoom(*state);
+            }
             // Derived, not asserted: this fits *one* panel, so with sync off in
             // 3-D the others keep whatever they had and the honest report is
             // Mixed. Hardcoding Fit here claimed all three had been fitted.
             refreshScaleReport();
         });
     connect(view, &ImageView::viewportResized, this,
-        [this, &state](const QSize&) {
-            if (!m_dataset || !std::dynamic_pointer_cast<
-                    remote::RemoteDatasetSession>(m_dataset)) {
-                return;
-            }
-            if (remoteDemandCanvas(state)) {
-                updateRemoteFixedScaleDemand(state);
-                return;
-            }
-            if (!state.hasCachedRequest
-                || state.cachedRequest.outputSize != sliceOutputSize(state)) {
-                scheduleSliceRequest(state);
+        [this, states](const QSize&) {
+            for (auto* state : states()) {
+                const auto& session = layerFor(*state).session;
+                if (!session || !std::dynamic_pointer_cast<
+                        remote::RemoteDatasetSession>(session)) {
+                    continue;
+                }
+                if (remoteDemandCanvas(*state)) {
+                    updateRemoteFixedScaleDemand(*state);
+                    continue;
+                }
+                if (!state->hasCachedRequest
+                    || state->cachedRequest.outputSize != sliceOutputSize(*state)) {
+                    scheduleSliceRequest(*state);
+                }
             }
         });
     connect(view, &ImageView::canvasScrolled, this,
-        [this, &state] { updateRemoteFixedScaleDemand(state); });
+        [this, states] {
+            for (auto* state : states()) {
+                updateRemoteFixedScaleDemand(*state);
+            }
+        });
     // Scrolling or resizing moves what is on screen without changing the
     // raster. canvasScrolled cannot carry this: it fires only over a virtual
     // canvas, so a local fixed-scale scroll emitted nothing at all.
     connect(view, &ImageView::viewportMoved, this,
         [this] { m_volumeController->regionChanged(); });
     connect(view, &ImageView::panStepRequested, this,
-        [this, &state](const QPointF& direction) {
+        [this, leading](const QPointF& direction) {
             ++m_panStepRequests;
-            applyPanStep(state, direction);
+            if (auto* state = leading()) {
+                applyPanStep(*state, direction);
+            }
         });
 }
 
-std::array<MainWindow::PlaneViewState*, 4> MainWindow::allViewStates()
+std::vector<MainWindow::PlaneViewState*> MainWindow::allViewStates()
 {
-    return {&m_view2d, &m_planeViews[0], &m_planeViews[1], &m_planeViews[2]};
+    std::vector<PlaneViewState*> states{&m_view2d};
+    for (auto& layer : m_layers) {
+        for (auto& state : layer.planeViews) {
+            states.push_back(&state);
+        }
+    }
+    return states;
 }
 
 void MainWindow::setAllViewPlaceholders(const QString& text)
@@ -990,12 +1215,47 @@ void MainWindow::setAllViewPlaceholders(const QString& text)
 std::vector<MainWindow::PlaneViewState*> MainWindow::currentViews()
 {
     if (m_viewDimension == 3) {
-        return {&m_planeViews[0], &m_planeViews[1], &m_planeViews[2]};
+        std::vector<PlaneViewState*> states;
+        for (auto& layer : m_layers) {
+            if (!layer.active) {
+                continue;
+            }
+            for (auto& state : layer.planeViews) {
+                states.push_back(&state);
+            }
+        }
+        return states;
     }
     if (m_viewDimension == 2) {
         return {&m_view2d};
     }
     return {};
+}
+
+std::vector<MainWindow::PlaneViewState*> MainWindow::primaryViews()
+{
+    if (m_viewDimension == 3) {
+        return {&primary().planeViews[0], &primary().planeViews[1],
+            &primary().planeViews[2]};
+    }
+    if (m_viewDimension == 2) {
+        return {&m_view2d};
+    }
+    return {};
+}
+
+std::vector<MainWindow::PlaneViewState*> MainWindow::statesForPanel(int normal)
+{
+    std::vector<PlaneViewState*> states;
+    if (m_viewDimension != 3 || normal < 0 || normal > 2) {
+        return states;
+    }
+    for (auto& layer : m_layers) {
+        if (layer.active) {
+            states.push_back(&layer.planeViews[static_cast<std::size_t>(normal)]);
+        }
+    }
+    return states;
 }
 
 void MainWindow::setActiveView(PlaneViewState& state)
@@ -1024,14 +1284,30 @@ void MainWindow::setActiveView(PlaneViewState& state)
 
 void MainWindow::syncActiveViewColorControls(const PlaneViewState& state)
 {
-    // The color scale and range boxes track the active view.
-    m_colorBar->setLogarithmic(state.displayLogarithmic);
-    m_colorBar->setFieldRange(state.displayLogarithmic
-        ? state.fieldName + tr(" (log)") : state.fieldName,
-        state.displayMinimum, state.displayMaximum);
-    m_range->showLogarithmic(state.displayLogarithmic);
-    if (m_range->mode() != RangeMode::User) {
-        m_range->showDisplayRange(state.displayMinimum, state.displayMaximum);
+    // The color scale and range boxes track the active view. Precision first,
+    // so the boxes render the new values at the new digit count in one pass.
+    applyDisplayPrecision(state.displayMinimum, state.displayMaximum);
+    const auto push = [this](const PlaneViewState& shown) {
+        auto& layer = layerFor(shown);
+        layer.colorBar->setLogarithmic(shown.displayLogarithmic);
+        layer.colorBar->setFieldRange(shown.displayLogarithmic
+            ? shown.fieldName + tr(" (log)") : shown.fieldName,
+            shown.displayMinimum, shown.displayMaximum);
+        layer.range->showLogarithmic(shown.displayLogarithmic);
+        if (layer.range->mode() != RangeMode::User) {
+            layer.range->showDisplayRange(shown.displayMinimum, shown.displayMaximum);
+        }
+    };
+    push(state);
+    // Each layer's widgets show its own raster on the active panel; a
+    // companion following the primary has none on show.
+    if (m_pair && m_viewDimension == 3) {
+        for (const auto* other : statesForPanel(state.normal)) {
+            if (other != &state && other->plane->width > 0
+                && !(other->layer == 1 && m_companionFollowsPrimary)) {
+                push(*other);
+            }
+        }
     }
     syncDatasetWindowColors();
 }
@@ -1039,7 +1315,7 @@ void MainWindow::syncActiveViewColorControls(const PlaneViewState& state)
 std::array<int, 2> MainWindow::displayAxes(int normal) const
 {
     std::array<int, 2> axes{0, 1};
-    if (m_dataset && m_dataset->metadata().dimension == 3) {
+    if (primary().session && primary().session->metadata().dimension == 3) {
         std::size_t next = 0;
         for (int axis = 0; axis < 3; ++axis) {
             if (axis != normal) {
@@ -1053,46 +1329,91 @@ std::array<int, 2> MainWindow::displayAxes(int normal) const
 std::array<int, 2> MainWindow::nativeOutputSize(
     const PlaneViewState& state) const
 {
-    if (!m_openMetadata || m_openMetadata->levels.empty()) {
+    if (!layerFor(state).openMetadata || layerFor(state).openMetadata->levels.empty()) {
         return {1, 1};
     }
     const auto target = state.visibleRegion.value_or(
-        datasetSampleBounds(*m_openMetadata));
+        datasetSampleBounds(*layerFor(state).openMetadata));
     return finestNativeOutputSize(
-        *m_openMetadata, target, state.normal);
+        *layerFor(state).openMetadata, target, state.normal);
+}
+
+bool MainWindow::layerIsRemote(const PlaneViewState& state) const
+{
+    return std::dynamic_pointer_cast<remote::RemoteDatasetSession>(
+               layerFor(state).session)
+        != nullptr;
 }
 
 std::array<int, 2> MainWindow::sliceOutputSize(
     const PlaneViewState& state, bool forceRemote) const
 {
-    if (!forceRemote
-        && !std::dynamic_pointer_cast<remote::RemoteDatasetSession>(m_dataset)) {
+    if (!forceRemote && !layerIsRemote(state)) {
         return nativeOutputSize(state);
     }
-    if (!m_openMetadata || m_openMetadata->levels.empty()) {
+    if (!layerFor(state).openMetadata || layerFor(state).openMetadata->levels.empty()) {
         return {1, 1};
     }
-    const auto viewportPixels = viewportPixelSize(state);
+    auto viewportPixels = stretchedViewportPixelSize(state);
     const auto target = state.visibleRegion.value_or(
-        datasetSampleBounds(*m_openMetadata));
+        datasetSampleBounds(*layerFor(state).openMetadata));
+    if (m_pair && state.visibleRegion.has_value()) {
+        // Over a pair a zoomed layer fills only its share of the framed
+        // window -- a selection straddling the interface splits the height
+        // between the two -- so its raster is bounded by that share of the
+        // viewport rather than fetched as if it filled the whole of it.
+        const auto rect = pairLayout(state.normal).sceneRectForRegion(state.layer, target);
+        const auto canvas = pairCanvasRect(state.normal);
+        const auto share = [](double part, double whole) {
+            return whole > 0.0 ? std::clamp(part / whole, 0.0, 1.0) : 1.0;
+        };
+        for (std::size_t axis = 0; axis < 2; ++axis) {
+            const auto fraction = axis == 0 ? share(rect.width, canvas.width)
+                                            : share(rect.height, canvas.height);
+            viewportPixels[axis] = std::max(1,
+                static_cast<int>(std::ceil(viewportPixels[axis] * fraction)));
+        }
+    }
     std::array<int, 2> outputSize{};
     if (state.view->transformMode() == ImageView::TransformMode::FixedScale) {
         outputSize = finestNativeOutputSize(
-            *m_openMetadata, target, state.normal);
+            *layerFor(state).openMetadata, target, state.normal);
     } else if (!state.visibleRegion.has_value()) {
         outputSize = nativeBoundedViewportOutputSize(
-            *m_openMetadata, target, state.normal, viewportPixels);
+            *layerFor(state).openMetadata, target, state.normal, viewportPixels);
     } else {
         // Rubber-band selections intentionally retain their exact aspect (in
         // finest cells, the display's unit). Their fractional edges need not
         // have the rounded native-cell aspect used to suppress Fit
         // supersampling on a whole-domain view.
         outputSize = viewportBoundedOutputSize(
-            *m_openMetadata, target, state.normal, viewportPixels);
+            *layerFor(state).openMetadata, target, state.normal, viewportPixels);
     }
     return frameBudgetBoundedOutputSize(
         outputSize,
-        m_dataset ? m_dataset->maximumResponseBytes() : std::nullopt);
+        layerFor(state).session ? layerFor(state).session->maximumResponseBytes() : std::nullopt);
+}
+
+std::array<int, 2> MainWindow::stretchedViewportPixelSize(
+    const PlaneViewState& state) const
+{
+    // The raster keeps the cell aspect; the view stretches it. A raster sized
+    // to fill the viewport along its binding axis would then be shown with
+    // more screen pixels than raster pixels along the stretched axis. Sizing
+    // it for a viewport enlarged along the less stretched axis by the ratio
+    // keeps a raster pixel no larger than a screen pixel on both axes; the
+    // native and frame-budget bounds the callers apply still cap it.
+    const auto viewportPixels = viewportPixelSize(state);
+    const auto stretch = displayStretchFor(state);
+    const auto largest = std::max(stretch[0], stretch[1]);
+    const auto enlarge = [](int pixels, double factor) {
+        // Clamped as a double: the product can pass INT_MAX on an extreme
+        // cell aspect, and an int cast first would wrap.
+        return static_cast<int>(std::lround(std::clamp(pixels * factor, 1.0,
+            static_cast<double>(maxSliceOutputDimension))));
+    };
+    return {enlarge(viewportPixels[0], largest / stretch[0]),
+        enlarge(viewportPixels[1], largest / stretch[1])};
 }
 
 std::array<int, 2> MainWindow::viewportPixelSize(
@@ -1113,18 +1434,18 @@ std::array<int, 2> MainWindow::viewportPixelSize(
 QSize MainWindow::logicalImageSize(const PlaneViewState& state,
     const ScalarPlane& plane, const QImage& image) const
 {
-    if (!m_openMetadata || m_openMetadata->levels.empty()
+    if (!layerFor(state).openMetadata || layerFor(state).openMetadata->levels.empty()
         || displayIsSpherical()) {
         return image.size();
     }
     const auto native = finestNativeOutputSize(
-        *m_openMetadata, plane.physicalRegion, state.normal);
+        *layerFor(state).openMetadata, plane.physicalRegion, state.normal);
     return {native[0], native[1]};
 }
 
 bool MainWindow::displayIsSpherical() const
 {
-    return m_dataset && isSpherical2D(m_dataset->metadata());
+    return primary().session && isSpherical2D(primary().session->metadata());
 }
 
 bool MainWindow::displayIsSphericalWarp() const
@@ -1143,6 +1464,129 @@ void MainWindow::updateSphericalControls()
         m_sphericalSupersampleMenu->setEnabled(
             spherical && m_sphericalDisplay == SphericalDisplay::RZ);
     }
+}
+
+void MainWindow::updateAspectControls()
+{
+    if (m_aspectMenu == nullptr) {
+        return;
+    }
+    const bool hasDataset = primary().session != nullptr;
+    m_aspectMenu->setEnabled(hasDataset && !displayIsSpherical());
+    const bool physicalAvailable
+        = hasDataset && primary().session->metadata().hasPhysicalGeometry;
+    if (m_aspectPhysicalAction != nullptr) {
+        m_aspectPhysicalAction->setEnabled(physicalAvailable);
+    }
+    // Show the mode in effect: Physical Size falls back to Cell Counts on a
+    // dataset without geometry, and the saved preference returns with the
+    // next dataset that has it. setChecked does not emit triggered, so the
+    // preference itself is untouched here.
+    const auto shown = physicalAvailable ? m_aspectMode : AspectMode::CellCounts;
+    if (m_aspectGroup != nullptr) {
+        for (auto* action : m_aspectGroup->actions()) {
+            if (action->data().toInt() == static_cast<int>(shown)) {
+                action->setChecked(true);
+            }
+        }
+    }
+}
+
+std::array<double, 3> MainWindow::displayStretchPerAxis() const
+{
+    if (!primary().session) {
+        return {1.0, 1.0, 1.0};
+    }
+    return amrvis::qt::displayStretchPerAxis(primary().session->metadata(),
+        m_aspectMode, m_axisScale, displayIsSpherical());
+}
+
+std::array<double, 2> MainWindow::displayStretchFor(
+    const PlaneViewState& state) const
+{
+    // Normalized over the dataset's axes, not the panel's own two: at a
+    // fixed scale every panel then shows an axis at the same pixels per
+    // length, so the XY panel of a dataset with tall, thin cells is as wide
+    // at 1x as the XZ panel beside it. One screen pixel per cell at 1x goes
+    // to the tightest axis of the dataset, wherever it is shown.
+    const auto stretch = displayStretchPerAxis();
+    const auto axes = displayAxes(state.normal);
+    std::array<double, 2> panel{
+        stretch[static_cast<std::size_t>(axes[0])],
+        stretch[static_cast<std::size_t>(axes[1])]};
+    auto smallest = std::numeric_limits<double>::infinity();
+    const auto shown = m_viewDimension == 3 ? std::size_t{3} : std::size_t{2};
+    for (std::size_t axis = 0; axis < shown; ++axis) {
+        if (std::isfinite(stretch[axis]) && stretch[axis] > 0.0) {
+            smallest = std::min(smallest, stretch[axis]);
+        }
+    }
+    if (std::isfinite(smallest) && smallest > 0.0) {
+        panel[0] /= smallest;
+        panel[1] /= smallest;
+    }
+    return panel;
+}
+
+void MainWindow::applyDisplayStretch(PlaneViewState& state)
+{
+    if (state.view == nullptr) {
+        return;
+    }
+    if (m_pair) {
+        // Two datasets: each tile's stretch is baked into its placement (see
+        // PairLayout), so the view itself stretches nothing.
+        state.view->setDisplayStretch(1.0, 1.0);
+        return;
+    }
+    const auto stretch = displayStretchFor(state);
+    state.view->setDisplayStretch(stretch[0], stretch[1]);
+}
+
+void MainWindow::applyDisplayStretches()
+{
+    if (m_pair) {
+        updatePairLayouts();
+        applyPairLayouts();
+        updatePairedIsoGeometry();
+    }
+    for (auto* state : currentViews()) {
+        if (state->view == nullptr) {
+            continue;
+        }
+        applyDisplayStretch(*state);
+        if (!layerIsRemote(*state) || !state->view->hasImage()) {
+            continue;
+        }
+        // A remote raster is sized for the screen it fills, and the stretch
+        // just changed how much of the screen each axis fills: the same
+        // follow-up a viewport resize gets (see the viewportResized handler).
+        if (remoteDemandCanvas(*state)) {
+            updateRemoteFixedScaleDemand(*state);
+        } else if (state->hasCachedRequest
+            && state->cachedRequest.outputSize != sliceOutputSize(*state)) {
+            scheduleSliceRequest(*state);
+        }
+    }
+    updateScaleBarAvailability();
+    updateScaleBars();
+    refreshScaleReport();
+}
+
+void MainWindow::setAspectMode(AspectMode mode)
+{
+    if (mode != m_aspectMode) {
+        m_aspectMode = mode;
+        saveSettings();
+    }
+    if (m_aspectGroup != nullptr) {
+        for (auto* action : m_aspectGroup->actions()) {
+            if (action->data().toInt() == static_cast<int>(mode)) {
+                action->setChecked(true);
+            }
+        }
+    }
+    applyDisplayStretches();
 }
 
 std::array<QString, 2> MainWindow::sphericalAxisLabels(SphericalDisplay mode)
@@ -1166,8 +1610,8 @@ PlaneMapping MainWindow::planeMapping(const PlaneViewState& state) const
     mapping.mode = state.sphericalDisplay;
     mapping.logicalRegion = state.plane->physicalRegion;
     mapping.displayRegion = state.displayRegion;
-    mapping.sceneWidth = std::max(1, state.view->image().width());
-    mapping.sceneHeight = std::max(1, state.view->image().height());
+    mapping.sceneWidth = std::max(1, state.view->image(state.tile).width());
+    mapping.sceneHeight = std::max(1, state.view->image(state.tile).height());
     mapping.planeWidth = std::max(1, state.plane->width);
     mapping.planeHeight = std::max(1, state.plane->height);
     return mapping;
@@ -1183,6 +1627,19 @@ void MainWindow::createMenus()
     openAction->setShortcut(QKeySequence::Open);
     connect(openAction, &QAction::triggered, this, [this] { chooseDataset(); });
 
+    // A second 3-D plotfile beside the open one (see MainWindowCompanion.cpp).
+    auto* openCompanionAction = new QAction(tr("Open Compan&ion Plotfile..."), this);
+    openCompanionAction->setObjectName(QStringLiteral("openCompanionAction"));
+    // Offered once a plotfile that can take one is open.
+    openCompanionAction->setEnabled(false);
+    m_openCompanionAction = openCompanionAction;
+    connect(openCompanionAction, &QAction::triggered, this,
+        [this] { chooseCompanion(); });
+    m_closeCompanionAction = new QAction(tr("Close Companion"), this);
+    m_closeCompanionAction->setObjectName(QStringLiteral("closeCompanionAction"));
+    m_closeCompanionAction->setEnabled(false);
+    connect(m_closeCompanionAction, &QAction::triggered, this,
+        [this] { closeCompanion(); });
     auto* openSequenceAction = new QAction(tr("Open Plotfile &Sequence..."), this);
     connect(openSequenceAction, &QAction::triggered, this,
         [this] { choosePlotfileSequence(); });
@@ -1196,6 +1653,16 @@ void MainWindow::createMenus()
         tr("Open &Remote Plotfile Sequence..."), this);
     connect(openRemoteSequenceAction, &QAction::triggered, this,
         [this] { m_remoteSession->promptOpen(this, true); });
+
+    // The remote form of Open Companion Plotfile: a plotfile on a server,
+    // beside a local or a remote primary.
+    m_openRemoteCompanionAction = new QAction(
+        tr("Open Remote Companion P&lotfile..."), this);
+    m_openRemoteCompanionAction->setObjectName(
+        QStringLiteral("openRemoteCompanionAction"));
+    m_openRemoteCompanionAction->setEnabled(false);
+    connect(m_openRemoteCompanionAction, &QAction::triggered, this,
+        [this] { chooseRemoteCompanion(); });
 
     auto* openFabAction = new QAction(tr("Open &FAB..."), this);
     connect(openFabAction, &QAction::triggered, this,
@@ -1233,9 +1700,12 @@ void MainWindow::createMenus()
     fileMenu->addSeparator();
     fileMenu->addAction(openAction);
     fileMenu->addAction(openSequenceAction);
+    fileMenu->addAction(openCompanionAction);
+    fileMenu->addAction(m_closeCompanionAction);
     fileMenu->addSeparator();
     fileMenu->addAction(openRemoteAction);
     fileMenu->addAction(openRemoteSequenceAction);
+    fileMenu->addAction(m_openRemoteCompanionAction);
     fileMenu->addSeparator();
     fileMenu->addAction(openFabAction);
     fileMenu->addAction(openMultiFabAction);
@@ -1338,6 +1808,38 @@ void MainWindow::createMenus()
     }
     m_sphericalMenu->addMenu(m_sphericalSupersampleMenu);
 
+    // "Aspect Ratio": whether a panel is proportioned by cell counts (one
+    // square pixel per finest cell) or by physical size, plus per-axis
+    // factors. Enabled per dataset in updateAspectControls.
+    m_aspectMenu = new QMenu(tr("Aspect Ratio"), this);
+    m_aspectMenu->setEnabled(false);
+    m_aspectGroup = new QActionGroup(this);
+    const std::array<std::pair<AspectMode, QString>, 2> aspectModes{
+        std::pair{AspectMode::CellCounts, tr("Cell Counts")},
+        std::pair{AspectMode::PhysicalSize, tr("Physical Size")}};
+    for (const auto& [mode, label] : aspectModes) {
+        auto* action = new QAction(label, m_aspectMenu);
+        action->setObjectName(mode == AspectMode::CellCounts
+            ? QStringLiteral("aspectCellCountsAction")
+            : QStringLiteral("aspectPhysicalSizeAction"));
+        action->setCheckable(true);
+        action->setActionGroup(m_aspectGroup);
+        action->setData(static_cast<int>(mode));
+        action->setChecked(mode == m_aspectMode);
+        connect(action, &QAction::triggered, this,
+            [this, mode] { setAspectMode(mode); });
+        m_aspectMenu->addAction(action);
+        if (mode == AspectMode::PhysicalSize) {
+            m_aspectPhysicalAction = action;
+        }
+    }
+    m_aspectMenu->addSeparator();
+    auto* axisScalingAction = new QAction(tr("Axis Scaling..."), this);
+    axisScalingAction->setObjectName(QStringLiteral("axisScalingAction"));
+    connect(axisScalingAction, &QAction::triggered, this,
+        [this] { showAxisScalingDialog(); });
+    m_aspectMenu->addAction(axisScalingAction);
+
     m_levelMenu = new QMenu(tr("&Level"), this);
     m_levelGroup = new QActionGroup(this);
     m_levelMenu->setEnabled(false);
@@ -1364,6 +1866,19 @@ void MainWindow::createMenus()
         }
         saveSettings();  // overlay/boxes
     });
+    m_scaleBarAction = new QAction(tr("Scale Bar"), this);
+    m_scaleBarAction->setCheckable(true);
+    m_scaleBarAction->setChecked(m_scaleBarVisible);
+    m_scaleBarAction->setEnabled(false);
+    connect(m_scaleBarAction, &QAction::toggled, this, [this](bool visible) {
+        m_scaleBarVisible = visible;
+        updateScaleBars();
+        saveSettings();  // overlay/scaleBar
+    });
+    auto* lengthUnitsAction = new QAction(tr("Length &Units..."), this);
+    lengthUnitsAction->setObjectName(QStringLiteral("lengthUnitsAction"));
+    connect(lengthUnitsAction, &QAction::triggered,
+        this, [this] { showLengthUnitsDialog(); });
     m_slicePlanesAction = new QAction(tr("Sl&ice Planes"), this);
     m_slicePlanesAction->setCheckable(true);
     m_slicePlanesAction->setEnabled(false);
@@ -1380,6 +1895,7 @@ void MainWindow::createMenus()
         this, [this] { showContoursDialog(); });
 
     auto* particlesAction = m_particleController->createAction(this);
+    m_particlesAction = particlesAction;
     connect(particlesAction, &QAction::triggered, this,
         [this] { m_particleController->showDialog(this); });
 
@@ -1399,10 +1915,14 @@ void MainWindow::createMenus()
     viewMenu->addMenu(scaleMenu);
     viewMenu->addMenu(m_levelMenu);
     viewMenu->addAction(m_boxesAction);
+    viewMenu->addAction(m_scaleBarAction);
+    viewMenu->addAction(lengthUnitsAction);
     viewMenu->addAction(m_slicePlanesAction);
-    viewMenu->addAction(m_volumeController->createAction(this));
+    m_volumeAction = m_volumeController->createAction(this);
+    viewMenu->addAction(m_volumeAction);
     viewMenu->addMenu(paletteMenu);
     viewMenu->addSeparator();
+    viewMenu->addMenu(m_aspectMenu);
     viewMenu->addMenu(m_sphericalMenu);
     viewMenu->addSeparator();
     viewMenu->addAction(m_contoursAction);
@@ -1422,9 +1942,12 @@ void MainWindow::createMenus()
     viewMenu->addAction(m_diagnosticsDock->toggleViewAction());
     viewMenu->addAction(m_animationDock->toggleViewAction());
     viewMenu->addAction(m_fabSelectorDock->toggleViewAction());
+    viewMenu->addSeparator();
+    // Application-wide rather than per-view, hence its own group at the end.
+    viewMenu->addMenu(m_themeController->createMenu(this));
 
     // Variable menu: lists all fields with a bullet on the active one.
-    m_variableMenu = menuBar()->addMenu(tr("&Variable"));
+    m_variableMenu = menuBar()->addMenu(tr("Va&riable"));
     // Menus hide action tooltips unless asked: the derived fields carry their
     // expressions there, and the Expression Editor entry carries the reason it
     // is unavailable, neither of which reaches anyone otherwise.
@@ -1456,10 +1979,10 @@ void MainWindow::createMenus()
 void MainWindow::rebuildLevelMenu()
 {
     m_levelMenu->clear();
-    if (!m_dataset) {
+    if (!primary().session) {
         return;
     }
-    const auto& metadata = m_dataset->metadata();
+    const auto& metadata = primary().session->metadata();
     auto* finest = new QAction(tr("Finest available"), m_levelMenu);
     finest->setCheckable(true);
     finest->setActionGroup(m_levelGroup);
@@ -1473,9 +1996,9 @@ void MainWindow::rebuildLevelMenu()
         finest->setShortcuts(finestShortcuts);
     }
     connect(finest, &QAction::triggered, this, [this] {
-        const auto index = m_levelSelector->findData(-1);
+        const auto index = primary().levelSelector->findData(-1);
         if (index >= 0) {
-            m_levelSelector->setCurrentIndex(index);
+            primary().levelSelector->setCurrentIndex(index);
         }
     });
     m_levelMenu->addAction(finest);
@@ -1491,9 +2014,9 @@ void MainWindow::rebuildLevelMenu()
                 Qt::CTRL | static_cast<Qt::Key>(Qt::Key_0 + level)));
         }
         connect(action, &QAction::triggered, this, [this, comboData] {
-            const auto index = m_levelSelector->findData(comboData);
+            const auto index = primary().levelSelector->findData(comboData);
             if (index >= 0) {
-                m_levelSelector->setCurrentIndex(index);
+                primary().levelSelector->setCurrentIndex(index);
             }
         });
         m_levelMenu->addAction(action);
@@ -1513,9 +2036,9 @@ void MainWindow::rebuildLevelMenu()
                     Qt::ALT | static_cast<Qt::Key>(Qt::Key_0 + level)));
             }
             connect(action, &QAction::triggered, this, [this, level] {
-                const auto index = m_levelSelector->findData(level);
+                const auto index = primary().levelSelector->findData(level);
                 if (index >= 0) {
-                    m_levelSelector->setCurrentIndex(index);
+                    primary().levelSelector->setCurrentIndex(index);
                 }
             });
             m_levelMenu->addAction(action);
@@ -1526,7 +2049,7 @@ void MainWindow::rebuildLevelMenu()
 
 void MainWindow::syncMenuChecks()
 {
-    const auto currentData = m_levelSelector->currentData().toInt();
+    const auto currentData = primary().levelSelector->currentData().toInt();
     const auto levelActions = m_levelMenu->actions();
     for (auto* action : levelActions) {
         action->setChecked(action->data().toInt() == currentData);
@@ -1540,14 +2063,14 @@ void MainWindow::rebuildVariableMenu(const std::vector<DerivedFieldRow>& rows)
     // Editor entry alone, greyed out with the reason on its tooltip, which is
     // more discoverable than a menu that cannot be opened at all.
     m_variableMenu->setEnabled(true);
-    if (!m_dataset) {
+    if (!primary().session) {
         m_variableMenu->addAction(m_expressionEditorAction);
         m_derivedFields->refreshAvailability();
         return;
     }
-    const auto& metadata = m_dataset->metadata();
-    const auto currentField = m_fieldSelector->currentIndex() >= 0
-        ? m_fieldSelector->currentData().toUInt() : 0;
+    const auto& metadata = primary().session->metadata();
+    const auto currentField = primary().fieldSelector->currentIndex() >= 0
+        ? primary().fieldSelector->currentData().toUInt() : 0;
     const auto stored = storedFieldCount();
     const auto addField = [this, currentField](
                               const QString& name, std::size_t field) {
@@ -1560,10 +2083,10 @@ void MainWindow::rebuildVariableMenu(const std::vector<DerivedFieldRow>& rows)
         action->setChecked(static_cast<std::uint32_t>(field) == currentField);
         action->setData(static_cast<unsigned int>(field));
         connect(action, &QAction::triggered, this, [this, field] {
-            const auto index = m_fieldSelector->findData(
+            const auto index = primary().fieldSelector->findData(
                 static_cast<unsigned int>(field));
             if (index >= 0) {
-                m_fieldSelector->setCurrentIndex(index);
+                primary().fieldSelector->setCurrentIndex(index);
             }
         });
         return action;
@@ -1597,11 +2120,11 @@ void MainWindow::rebuildVariableMenu(const std::vector<DerivedFieldRow>& rows)
 
 void MainWindow::syncVariableMenu()
 {
-    if (!m_dataset) {
+    if (!primary().session) {
         return;
     }
-    const auto currentField = m_fieldSelector->currentIndex() >= 0
-        ? m_fieldSelector->currentData().toUInt() : 0;
+    const auto currentField = primary().fieldSelector->currentIndex() >= 0
+        ? primary().fieldSelector->currentData().toUInt() : 0;
     // Only the field entries, which are the ones in the group: the separator
     // and the Expression Editor action follow them.
     // By the id each action carries, not by its position: the two agree only
@@ -1680,7 +2203,7 @@ bool MainWindow::reloadCurrentDataset()
     // Not while closing: another window's Apply reaches every window, and a
     // worker started here would hold the I/O mutex against the quit. The
     // completion handler checks m_closing, but the read still runs.
-    if (m_closing || !m_dataset || m_datasetPath.empty() || !m_openMetadata) {
+    if (m_closing || !primary().session || m_datasetPath.empty() || !primary().openMetadata) {
         return false;
     }
     if (m_playbackMode == PlaybackMode::Sequence) {
@@ -1743,7 +2266,7 @@ bool MainWindow::reloadCurrentDataset()
     // field. A connection that has gone fails the reload cleanly instead,
     // which is the honest outcome.
     if (const auto remote
-        = std::dynamic_pointer_cast<remote::RemoteDatasetSession>(m_dataset)) {
+        = std::dynamic_pointer_cast<remote::RemoteDatasetSession>(primary().session)) {
         requestInitialSlice(m_datasetPath, generation, std::nullopt, {},
             buildFrameSpec(),
             SliceLoad{{}, RemoteOpen{remote->connection(),
@@ -1763,20 +2286,24 @@ bool MainWindow::reloadCurrentDataset()
 
 void MainWindow::refreshMetadataDisplay()
 {
-    if (!m_dataset) {
+    if (!primary().session) {
         return;
     }
     PlotfileMetadataResult displayed;
     displayed.metadata =
-        std::make_shared<const DatasetMetadata>(m_dataset->metadata());
-    displayed.metrics = m_dataset->metadataReadMetrics();
-    displayed.fileVersion = m_dataset->fileVersion();
+        std::make_shared<const DatasetMetadata>(primary().session->metadata());
+    displayed.metrics = primary().session->metadataReadMetrics();
+    displayed.fileVersion = primary().session->fileVersion();
     showMetadata(displayed, m_datasetPath);
 }
 
 void MainWindow::refreshPaletteDisplay()
 {
-    m_colorBar->setPalette(&m_paletteController->palette());
+    for (auto& layer : m_layers) {
+        if (layer.colorBar != nullptr) {
+            layer.colorBar->setPalette(&m_paletteController->palette());
+        }
+    }
     syncDatasetWindowColors();
     scheduleSliceRequest();
     updateGridBoxes();
@@ -1788,7 +2315,7 @@ void MainWindow::refreshPaletteDisplay()
 
 void MainWindow::showContoursDialog()
 {
-    if (!m_dataset) {
+    if (!primary().session) {
         return;
     }
     if (m_contoursDialog != nullptr) {
@@ -1796,7 +2323,7 @@ void MainWindow::showContoursDialog()
         m_contoursDialog->activateWindow();
         return;
     }
-    const auto& fields = m_dataset->metadata().fields;
+    const auto& fields = primary().session->metadata().fields;
     std::vector<std::string> fieldNames;
     fieldNames.reserve(fields.size());
     for (const auto& field : fields) {
@@ -1851,7 +2378,7 @@ void MainWindow::applyContourSettings(
         if (involvesVectors) {
             for (auto* state : currentViews()) {
                 state->vectorSegments.clear();
-                state->view->setOverlaySegments({});
+                state->view->setOverlaySegments({}, state->tile);
             }
         }
         scheduleSliceRequest(false);

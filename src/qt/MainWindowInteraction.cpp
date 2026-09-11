@@ -47,11 +47,19 @@ void MainWindow::showNumberFormatDialog()
     auto* edit = new QLineEdit(m_numberFormat, dialog);
     edit->setMinimumWidth(160);
     auto* syntaxLabel = new QLabel(
-        tr("C printf format, e.g. %1").arg(defaultNumberFormat()), dialog);
+        tr("C printf format, e.g. %1. A format with no precision adapts its "
+           "digits to the range on display, so values that differ only far "
+           "out stay distinguishable. Give an explicit precision, like %2, "
+           "to pin the digit count.")
+            .arg(defaultNumberFormat(), QStringLiteral("%.13g")),
+        dialog);
+    syntaxLabel->setWordWrap(true);
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok
         | QDialogButtonBox::Apply | QDialogButtonBox::Cancel, dialog);
     auto* defaultButton = buttons->addButton(
         tr("Default"), QDialogButtonBox::ResetRole);
+    auto* fullPrecisionButton = buttons->addButton(
+        tr("Full precision"), QDialogButtonBox::ResetRole);
     auto* layout = new QVBoxLayout(dialog);
     layout->addWidget(syntaxLabel);
     layout->addWidget(edit);
@@ -60,6 +68,13 @@ void MainWindow::showNumberFormatDialog()
     connect(defaultButton, &QPushButton::clicked, dialog, [this, edit] {
         edit->setText(defaultNumberFormat());
         applyNumberFormat(defaultNumberFormat());
+    });
+    connect(fullPrecisionButton, &QPushButton::clicked, dialog, [this, edit] {
+        // Every digit a double round-trips, pinned: the one-click answer for
+        // a user who wants the numbers rather than the reading.
+        const auto full = QStringLiteral("%.17g");
+        edit->setText(full);
+        applyNumberFormat(full);
     });
     connect(buttons, &QDialogButtonBox::clicked, dialog,
         [this, dialog, edit, buttons](QAbstractButton* button) {
@@ -96,17 +111,275 @@ void MainWindow::applyNumberFormat(const QString& format)
         return;
     }
     m_numberFormat = format;
-    m_range->setNumberFormat(format);
-    m_colorBar->setNumberFormat(format);
+    // The color bars and child windows resolve against their own ranges;
+    // only the range controls take the main view's resolved format.
+    for (auto& layer : m_layers) {
+        if (layer.colorBar != nullptr) {
+            layer.colorBar->setNumberFormat(format);
+        }
+    }
+    m_displayFormat = resolveNumberFormat(
+        format, m_lastDisplayMinimum, m_lastDisplayMaximum);
+    // The authored format can change even when its resolved form does not
+    // (for example, %.6g back to %g). Children must receive that change too.
+    pushDisplayFormat();
+    saveSettings();
+}
+
+void MainWindow::applyDisplayPrecision(double minimum, double maximum)
+{
+    m_lastDisplayMinimum = minimum;
+    m_lastDisplayMaximum = maximum;
+    const auto resolved = resolveNumberFormat(m_numberFormat, minimum, maximum);
+    if (resolved == m_displayFormat) {
+        return;
+    }
+    m_displayFormat = resolved;
+    pushDisplayFormat();
+}
+
+void MainWindow::pushDisplayFormat()
+{
+    for (auto& layer : m_layers) {
+        if (layer.range != nullptr) {
+            layer.range->setNumberFormat(m_displayFormat);
+        }
+    }
     // Open child windows repaint against the stored format; a null pointer
     // means the window picks the format up when it is next created.
     if (m_datasetWindow != nullptr) {
-        m_datasetWindow->setNumberFormat(format);
+        m_datasetWindow->setNumberFormat(m_numberFormat);
     }
     if (m_linePlotWindow != nullptr) {
-        m_linePlotWindow->setNumberFormat(format);
+        m_linePlotWindow->setNumberFormat(m_numberFormat);
     }
-    saveSettings();
+}
+
+void MainWindow::showLengthUnitsDialog()
+{
+    if (m_lengthUnitsDialog != nullptr) {
+        m_lengthUnitsDialog->raise();
+        m_lengthUnitsDialog->activateWindow();
+        return;
+    }
+    auto* dialog = new QDialog(this);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowTitle(tr("Length Units"));
+    dialog->setWindowFlags(Qt::Window);
+
+    auto* explanation = new QLabel(tr(
+        "Select the unit used by plotfile coordinates. Leave it unset to "
+        "display native code-unit lengths."), dialog);
+    explanation->setWordWrap(true);
+    auto* units = new QComboBox(dialog);
+    units->setObjectName(QStringLiteral("lengthUnitsCombo"));
+    units->addItem(tr("Native code units (unset)"), QString{});
+    for (const auto& candidate : lengthUnits) {
+        QString label;
+        switch (candidate.unit) {
+        case LengthUnit::Centimetre: label = tr("Centimetres (cm)"); break;
+        case LengthUnit::Metre: label = tr("Metres (m)"); break;
+        case LengthUnit::Kilometre: label = tr("Kilometres (km)"); break;
+        case LengthUnit::AstronomicalUnit:
+            label = tr("Astronomical units (AU)");
+            break;
+        case LengthUnit::Parsec: label = tr("Parsecs (pc)"); break;
+        case LengthUnit::Kiloparsec: label = tr("Kiloparsecs (kpc)"); break;
+        case LengthUnit::Megaparsec: label = tr("Megaparsecs (Mpc)"); break;
+        }
+        units->addItem(label, QString::fromStdString(std::string(candidate.id)));
+    }
+    const auto selected = units->findData(m_lengthUnitId);
+    units->setCurrentIndex(selected >= 0 ? selected : 0);
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok
+        | QDialogButtonBox::Apply | QDialogButtonBox::Cancel, dialog);
+    auto* layout = new QVBoxLayout(dialog);
+    layout->addWidget(explanation);
+    layout->addWidget(units);
+    layout->addWidget(buttons);
+
+    connect(buttons, &QDialogButtonBox::clicked, dialog,
+        [this, dialog, units, buttons](QAbstractButton* button) {
+            const auto role = buttons->buttonRole(button);
+            if (role == QDialogButtonBox::AcceptRole
+                || role == QDialogButtonBox::ApplyRole) {
+                applyLengthUnit(units->currentData().toString());
+                if (role == QDialogButtonBox::AcceptRole) {
+                    dialog->accept();
+                }
+            } else if (role == QDialogButtonBox::RejectRole) {
+                dialog->reject();
+            }
+        });
+    connect(dialog, &QDialog::finished, this, [this] {
+        m_lengthUnitsDialog = nullptr;
+    });
+    m_lengthUnitsDialog = dialog;
+    dialog->show();
+}
+
+void MainWindow::applyLengthUnit(const QString& unitId)
+{
+    const auto normalized = lengthUnitFromId(unitId.toStdString())
+        ? unitId : QString{};
+    if (m_lengthUnitId == normalized) {
+        return;
+    }
+    m_lengthUnitId = normalized;
+    updateScaleBars();
+}
+
+void MainWindow::resetLengthUnit()
+{
+    // Coordinate units belong to this dataset, including any unapplied choice.
+    if (m_lengthUnitsDialog != nullptr) {
+        m_lengthUnitsDialog->reject();
+    }
+    m_lengthUnitId.clear();
+    updateScaleBars();
+}
+
+void MainWindow::showAxisScalingDialog()
+{
+    if (m_axisScalingDialog != nullptr) {
+        m_axisScalingDialog->raise();
+        m_axisScalingDialog->activateWindow();
+        return;
+    }
+    auto* dialog = new QDialog(this);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowTitle(tr("Axis Scaling"));
+    dialog->setWindowFlags(Qt::Window);
+
+    auto* explanation = new QLabel(tr(
+        "Stretch each axis of the slice views by a factor. Factors apply on "
+        "top of the Aspect Ratio mode and reset when a dataset is opened."),
+        dialog);
+    explanation->setWordWrap(true);
+    const int dimension = primary().session ? primary().session->metadata().dimension : 3;
+    auto* form = new QFormLayout;
+    std::array<QDoubleSpinBox*, 3> spins{nullptr, nullptr, nullptr};
+    // With a companion, the axis perpendicular to the shared plane has a
+    // second factor for the companion, so each dataset can be stretched on
+    // its own; the primary's is the ordinary axis factor.
+    QDoubleSpinBox* companionSpin = nullptr;
+    const std::array<QString, 3> names{tr("X"), tr("Y"), tr("Z")};
+    const std::array<const char*, 3> objectNames{
+        "axisScaleSpinX", "axisScaleSpinY", "axisScaleSpinZ"};
+    const auto makeSpin = [dialog](const char* objectName, double value, bool enabled) {
+        auto* spin = new QDoubleSpinBox(dialog);
+        spin->setObjectName(QLatin1String(objectName));
+        spin->setDecimals(3);
+        spin->setRange(0.01, 100.0);
+        spin->setSingleStep(0.1);
+        spin->setValue(value);
+        spin->setEnabled(enabled);
+        return spin;
+    };
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+        const bool perpendicular
+            = m_pair && static_cast<int>(axis) == m_pair->perpendicularAxis;
+        auto* spin = makeSpin(objectNames[axis], m_axisScale[axis],
+            static_cast<int>(axis) < dimension);
+        form->addRow(perpendicular
+                ? tr("%1 (%2)").arg(names[axis],
+                    datasetDisplayName(m_datasetPath))
+                : names[axis],
+            spin);
+        spins[axis] = spin;
+        if (perpendicular) {
+            companionSpin = makeSpin("axisScaleSpinCompanion",
+                m_layers[1].perpendicularScale, true);
+            form->addRow(tr("%1 (%2)").arg(names[axis], m_layers[1].name), companionSpin);
+        }
+    }
+    const auto readFactors = [spins] {
+        std::array<double, 3> factors{1.0, 1.0, 1.0};
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            factors[axis] = spins[axis]->value();
+        }
+        return factors;
+    };
+    const auto readCompanion = [companionSpin]() -> std::optional<double> {
+        return companionSpin != nullptr ? std::optional{companionSpin->value()}
+                                        : std::nullopt;
+    };
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok
+        | QDialogButtonBox::Apply | QDialogButtonBox::Reset
+        | QDialogButtonBox::Cancel, dialog);
+    auto* layout = new QVBoxLayout(dialog);
+    layout->addWidget(explanation);
+    layout->addLayout(form);
+    layout->addWidget(buttons);
+
+    connect(buttons, &QDialogButtonBox::clicked, dialog,
+        [this, dialog, spins, companionSpin, readFactors, readCompanion,
+            buttons](QAbstractButton* button) {
+            const auto role = buttons->buttonRole(button);
+            if (role == QDialogButtonBox::AcceptRole
+                || role == QDialogButtonBox::ApplyRole) {
+                applyAxisScale(readFactors(), readCompanion());
+                if (role == QDialogButtonBox::AcceptRole) {
+                    dialog->accept();
+                }
+            } else if (role == QDialogButtonBox::ResetRole) {
+                for (auto* spin : spins) {
+                    spin->setValue(1.0);
+                }
+                if (companionSpin != nullptr) {
+                    companionSpin->setValue(1.0);
+                }
+                applyAxisScale({1.0, 1.0, 1.0}, 1.0);
+            } else if (role == QDialogButtonBox::RejectRole) {
+                dialog->reject();
+            }
+        });
+    connect(dialog, &QDialog::finished, this, [this] {
+        m_axisScalingDialog = nullptr;
+    });
+    m_axisScalingDialog = dialog;
+    dialog->show();
+}
+
+void MainWindow::applyAxisScale(const std::array<double, 3>& axisScale,
+    std::optional<double> companionPerpendicularScale)
+{
+    const auto sane = [](double value) {
+        return std::isfinite(value) && value > 0.0 ? value : 1.0;
+    };
+    std::array<double, 3> factors{1.0, 1.0, 1.0};
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+        factors[axis] = sane(axisScale[axis]);
+    }
+    bool changed = factors != m_axisScale;
+    m_axisScale = factors;
+    if (companionPerpendicularScale) {
+        const auto value = sane(*companionPerpendicularScale);
+        changed = changed || value != m_layers[1].perpendicularScale;
+        m_layers[1].perpendicularScale = value;
+    }
+    if (changed) {
+        applyDisplayStretches();
+    }
+}
+
+void MainWindow::resetAxisScale()
+{
+    // Axis factors belong to this dataset, including any unapplied edit.
+    if (m_axisScalingDialog != nullptr) {
+        m_axisScalingDialog->reject();
+    }
+    m_axisScale = {1.0, 1.0, 1.0};
+    // The views still show the outgoing dataset, and keep showing it if the
+    // new one fails to load, so they take the unit factors now. No remote
+    // re-request: that dataset is on its way out.
+    for (auto* state : currentViews()) {
+        applyDisplayStretch(*state);
+    }
+    updateScaleBarAvailability();
+    updateScaleBars();
 }
 
 void MainWindow::validateVectorMode()
@@ -114,7 +387,7 @@ void MainWindow::validateVectorMode()
     if (m_displayMode != DisplayMode::VelocityVectors) {
         return;
     }
-    const auto fieldCount = m_openMetadata ? m_openMetadata->fields.size() : 0;
+    const auto fieldCount = primary().openMetadata ? primary().openMetadata->fields.size() : 0;
     if (fieldCount < 2) {
         statusBar()->showMessage(
             tr("Velocity Vectors requires at least two fields"));
@@ -126,10 +399,10 @@ void MainWindow::validateVectorMode()
 
 void MainWindow::ensureVectorFieldDefaults()
 {
-    if (!m_openMetadata) {
+    if (!primary().openMetadata) {
         return;
     }
-    const auto& fields = m_openMetadata->fields;
+    const auto& fields = primary().openMetadata->fields;
     const auto count = static_cast<int>(fields.size());
     if (m_vectorUField >= 0 && m_vectorUField < count
         && m_vectorVField >= 0 && m_vectorVField < count
@@ -189,8 +462,8 @@ void MainWindow::updateOverlay(PlaneViewState& state)
     std::vector<OverlayPath> paths;
     const auto planeReady = state.plane->width > 1 && state.plane->height > 1;
     if (!planeReady || m_displayMode == DisplayMode::Raster) {
-        state.view->setOverlaySegments(overlays);
-        state.view->setOverlayPaths(paths);
+        state.view->setOverlaySegments(overlays, state.tile);
+        state.view->setOverlayPaths(paths, state.tile);
         return;
     }
 
@@ -219,14 +492,14 @@ void MainWindow::updateOverlay(PlaneViewState& state)
                     segment.x0, segment.y0, segment.x1, segment.y1);
             overlays.push_back({line, vectorColor, 1.0F});
         }
-        state.view->setOverlaySegments(overlays);
-        state.view->setOverlayPaths(paths);
+        state.view->setOverlaySegments(overlays, state.tile);
+        state.view->setOverlayPaths(paths, state.tile);
         return;
     }
 
     if (!(state.displayMinimum < state.displayMaximum)) {
-        state.view->setOverlaySegments(overlays);
-        state.view->setOverlayPaths(paths);
+        state.view->setOverlaySegments(overlays, state.tile);
+        state.view->setOverlayPaths(paths, state.tile);
         return;
     }
     try {
@@ -280,8 +553,8 @@ void MainWindow::updateOverlay(PlaneViewState& state)
     } catch (const std::exception&) {
         paths.clear();
     }
-    state.view->setOverlaySegments(overlays);
-    state.view->setOverlayPaths(paths);
+    state.view->setOverlaySegments(overlays, state.tile);
+    state.view->setOverlayPaths(paths, state.tile);
 }
 
 void MainWindow::updateOverlays()
@@ -294,11 +567,12 @@ void MainWindow::updateOverlays()
 void MainWindow::updateParticleOverlay(PlaneViewState& state)
 {
     std::vector<PointOverlay> overlays;
-    if (!m_dataset || !state.view->hasImage()
+    // Particles are the primary's; a companion's tile carries none.
+    if (!primary().session || state.layer != 0 || !state.view->hasImage()
         || state.plane->width <= 0 || state.plane->height <= 0
         // The warped R-Z view has no linear plane-pixel mapping for points.
         || displayIsSphericalWarp()) {
-        state.view->setPointOverlays(overlays);
+        state.view->setPointOverlays(overlays, state.tile);
         return;
     }
     const bool spherical = displayIsSpherical();
@@ -310,16 +584,16 @@ void MainWindow::updateParticleOverlay(PlaneViewState& state)
     // belongs to the raster under it. Empty means project through the volume.
     //
     // That request has to name the installed dataset, too. A frame switch
-    // assigns m_dataset before it shows the frame's planes, so a frame that
+    // assigns primary().session before it shows the frame's planes, so a frame that
     // then fails leaves the raster and its levels owned by different
     // datasets -- and this reads sourceLevel from the one and cellSize from
     // the other. Same test the raster path uses (see ownerChanged).
     std::vector<SliceCellSlab> levelSlabs;
     if (m_particleController->settings().sliceCellsOnly
-        && m_dataset->metadata().dimension == 3) {
+        && primary().session->metadata().dimension == 3) {
         if (state.hasCachedRequest
-            && state.cachedRequest.dataset == m_dataset->id()) {
-            levelSlabs = sliceCellSlabs(m_dataset->metadata(), state.normal,
+            && state.cachedRequest.dataset == primary().session->id()) {
+            levelSlabs = sliceCellSlabs(primary().session->metadata(), state.normal,
                 state.cachedRequest.physicalPosition);
         }
         if (levelSlabs.empty()) {
@@ -329,7 +603,7 @@ void MainWindow::updateParticleOverlay(PlaneViewState& state)
             // box exists to avoid. Draw nothing instead, which is what the
             // projector itself does when a plane's sourceLevel does not
             // match its raster.
-            state.view->setPointOverlays(overlays);
+            state.view->setPointOverlays(overlays, state.tile);
             return;
         }
     }
@@ -342,7 +616,7 @@ void MainWindow::updateParticleOverlay(PlaneViewState& state)
             = static_cast<float>(m_particleController->settings().pointSize);
         const auto projected = projectParticlePoints(
             sample.points, *state.plane,
-            m_dataset->metadata().dimension, state.normal, levelSlabs);
+            primary().session->metadata().dimension, state.normal, levelSlabs);
         overlay.points.reserve(projected.size());
         for (const auto& point : projected) {
             if (spherical) {
@@ -358,7 +632,7 @@ void MainWindow::updateParticleOverlay(PlaneViewState& state)
         }
         overlays.push_back(std::move(overlay));
     }
-    state.view->setPointOverlays(overlays);
+    state.view->setPointOverlays(overlays, state.tile);
 }
 
 void MainWindow::updateParticleOverlays()
@@ -450,13 +724,15 @@ double MainWindow::effectiveFixedScale(int factor) const
     // exact over-claim this report exists to prevent. The transpose needs no
     // special case: the worst axis is a min over both, which a swap does not
     // change.
-    if (!m_openMetadata || m_openMetadata->levels.empty() || factor <= 0
-        || m_activeView == nullptr || m_activeView->view == nullptr
+    if (m_activeView == nullptr || m_activeView->view == nullptr
+        || !layerFor(*m_activeView).openMetadata
+        || layerFor(*m_activeView).openMetadata->levels.empty() || factor <= 0
         || m_activeView->view->virtualCanvasActive()
         || displayIsSphericalWarp()) {
         return 0.0;
     }
-    const auto& metadata = *m_openMetadata;
+    // The active view's own layer: with a companion it may be the one on show.
+    const auto& metadata = *layerFor(*m_activeView).openMetadata;
     const auto& finest = metadata.levels[static_cast<std::size_t>(
         std::max(0, metadata.finestLevel))];
     // The region the raster actually covers, which is what nativeOutputSize
@@ -470,7 +746,7 @@ double MainWindow::effectiveFixedScale(int factor) const
     // finestNativeOutputSize the worker calls, so if the clamp moves or stops
     // being a plain per-axis limit, this report follows instead of drifting.
     // slicePlaneAxes is what finestNativeOutputSize itself uses, keyed on the
-    // same metadata -- not displayAxes, which keys on m_dataset and so
+    // same metadata -- not displayAxes, which keys on primary().session and so
     // disagrees while a dataset is opened but not yet published, pairing
     // output[k] with the wrong axis.
     const auto output = nativeOutputSize(*m_activeView);
@@ -638,6 +914,12 @@ void MainWindow::setScaleUiState(ScaleUiState state, int factor)
 
 void MainWindow::resetViewZoom(PlaneViewState& state)
 {
+    if (m_pair) {
+        // Both layers on the panel at once; asked once per layer state by
+        // resetZoomAllViews, the second call finds nothing left to reset.
+        resetPairPanelZoom(state.normal);
+        return;
+    }
     state.visibleRegion.reset();
     state.view->setVirtualCanvas(std::nullopt);
     state.view->fitToWindow();
@@ -660,10 +942,10 @@ QString MainWindow::probeReadout(
     const PlaneViewState& state, int x, int displayY) const
 {
     const auto& plane = *state.plane;
-    if (!m_dataset || plane.width <= 0 || plane.height <= 0) {
+    if (!layerFor(state).session || plane.width <= 0 || plane.height <= 0) {
         return tr("no data");
     }
-    const auto& metadata = m_dataset->metadata();
+    const auto& metadata = layerFor(state).session->metadata();
     const auto axes = displayAxes(state.normal);
     const auto xAxis = static_cast<std::size_t>(axes[0]);
     const auto yAxis = static_cast<std::size_t>(axes[1]);
@@ -713,8 +995,15 @@ QString MainWindow::probeReadout(
         return tr("no data");
     }
     if (metadata.dimension == 3) {
-        position[static_cast<std::size_t>(state.normal)]
-            = m_slicePosition3d[static_cast<std::size_t>(state.normal)];
+        const auto axis = static_cast<std::size_t>(state.normal);
+        position[axis] = m_slicePosition3d[axis];
+        if (m_pair) {
+            // The raster was cut at the shared position clamped into this
+            // layer's domain (see requestSlice); so is the readout.
+            const auto bounds = datasetSampleBounds(metadata);
+            position[axis] = std::clamp(position[axis], bounds.lower[axis],
+                std::nextafter(bounds.upper[axis], bounds.lower[axis]));
+        }
     }
     const auto level = std::clamp(
         static_cast<int>(plane.sourceLevel[offset]), 0, metadata.finestLevel);
@@ -806,24 +1095,34 @@ QString MainWindow::probeReadout(
     const auto levelText = metadata.hasPhysicalGeometry
         ? tr(" level=%1").arg(level)
         : QString();
-    const auto valueText = formatNumber(
-        static_cast<double>(plane.values[offset]), m_numberFormat);
+    // The value resolves against the field range, the coordinates against the
+    // region they live in. Sharing one digit count would print x to fifteen
+    // digits whenever the field happened to be nearly flat.
+    const auto valueFormat = resolveNumberFormat(
+        m_numberFormat, state.displayMinimum, state.displayMaximum);
+    const auto coordinateFormat = [&](std::size_t axis) {
+        return resolveNumberFormat(m_numberFormat,
+            plane.physicalRegion.lower[axis], plane.physicalRegion.upper[axis]);
+    };
+    const auto valueText = formatNumber(plane.values[offset], valueFormat);
     if (displayIsSpherical()) {
         // position[xAxis] is r, position[yAxis] is theta (from logicalFromScene).
         const QString theta(QChar(0x03B8));
-        const auto rText = formatNumber(position[xAxis], m_numberFormat);
-        const auto thetaText = formatNumber(position[yAxis], m_numberFormat);
+        const auto rText = formatNumber(position[xAxis], coordinateFormat(xAxis));
+        const auto thetaText
+            = formatNumber(position[yAxis], coordinateFormat(yAxis));
         QString coords;
         // The state's mode, not the menu selection: the readout labels must
         // match the mapping that produced the coordinates above.
         switch (state.sphericalDisplay) {
         case SphericalDisplay::RZ: {
-            // Physical (R, Z) plus the native spherical (r, theta).
+            // Physical (R, Z) share the radial precision; theta is an angle.
             const auto display = sphericalToDisplay(
                 position[xAxis], position[yAxis]);
             coords = QStringLiteral("R=%1 Z=%2 r=%3 %4=%5").arg(
-                formatNumber(display[0], m_numberFormat),
-                formatNumber(display[1], m_numberFormat), rText, theta, thetaText);
+                formatNumber(display[0], coordinateFormat(xAxis)),
+                formatNumber(display[1], coordinateFormat(xAxis)), rText, theta,
+                thetaText);
             break;
         }
         case SphericalDisplay::ThetaR:
@@ -839,9 +1138,9 @@ QString MainWindow::probeReadout(
     }
     return tr("%1=%2 %3=%4 value=%5%6 %7=(%8) %9")
         .arg(QString::fromLatin1(axisNames[xAxis]))
-        .arg(formatNumber(position[xAxis], m_numberFormat))
+        .arg(formatNumber(position[xAxis], coordinateFormat(xAxis)))
         .arg(QString::fromLatin1(axisNames[yAxis]))
-        .arg(formatNumber(position[yAxis], m_numberFormat))
+        .arg(formatNumber(position[yAxis], coordinateFormat(yAxis)))
         .arg(valueText)
         .arg(levelText)
         .arg(QString::fromLatin1(indexKind))
@@ -849,15 +1148,28 @@ QString MainWindow::probeReadout(
         .arg(boxText);
 }
 
+QString MainWindow::probeLine(const PlaneViewState& state, int x, int displayY) const
+{
+    const auto readout = probeReadout(state, x, displayY);
+    if (!companionOpen()) {
+        return readout;
+    }
+    // Two datasets: say which one the pointer is over.
+    const auto name = state.layer == 0
+        ? datasetDisplayName(m_datasetPath)
+        : m_layers[1].name;
+    return name.isEmpty() ? readout : name + QStringLiteral(": ") + readout;
+}
+
 void MainWindow::probeMoved(PlaneViewState& state, int x, int displayY)
 {
-    m_probeLabel->setText(probeReadout(state, x, displayY));
+    m_probeLabel->setText(probeLine(state, x, displayY));
 }
 
 void MainWindow::probeClicked(PlaneViewState& state, int x, int displayY)
 {
     setActiveView(state);
-    const auto line = probeReadout(state, x, displayY);
+    const auto line = probeLine(state, x, displayY);
     m_probeLabel->setText(line);
     m_diagnosticsModel->appendProbeLine(line);
     updateDiagnostics();
@@ -867,7 +1179,7 @@ void MainWindow::rubberBandZoom(PlaneViewState& state, const QRectF& sceneRect)
 {
     setActiveView(state);
     const auto& plane = *state.plane;
-    if (!m_dataset || plane.width <= 0 || plane.height <= 0) {
+    if (!layerFor(state).session || plane.width <= 0 || plane.height <= 0) {
         return;
     }
     if (displayIsSpherical()) {
@@ -875,8 +1187,8 @@ void MainWindow::rubberBandZoom(PlaneViewState& state, const QRectF& sceneRect)
         // from it is deferred. Zoom the view only, leaving the full-domain
         // warped raster in place.
         const QRectF bounds(0.0, 0.0,
-            static_cast<double>(state.view->image().width()),
-            static_cast<double>(state.view->image().height()));
+            static_cast<double>(state.view->image(state.tile).width()),
+            static_cast<double>(state.view->image(state.tile).height()));
         const auto selection = sceneRect.normalized().intersected(bounds);
         if (selection.width() < 1.0 || selection.height() < 1.0) {
             return;
@@ -916,7 +1228,7 @@ void MainWindow::applyRubberBandZoom(
     PlaneViewState& state, const QRectF& normalizedRect)
 {
     const auto& plane = *state.plane;
-    if (!m_dataset || plane.width <= 0 || plane.height <= 0) {
+    if (!layerFor(state).session || plane.width <= 0 || plane.height <= 0) {
         return;
     }
     const auto normalized = normalizedRect.normalized().intersected(
@@ -943,8 +1255,8 @@ void MainWindow::applyRubberBandZoom(
     // Local slices use one output pixel per finest cell, so their edges land
     // on cell boundaries. Remote slices are viewport-resampled; retaining the
     // exact selection keeps an arbitrary rubber-band aspect ratio intact.
-    if (!std::dynamic_pointer_cast<remote::RemoteDatasetSession>(m_dataset)) {
-        const auto& metadata = m_dataset->metadata();
+    if (!layerIsRemote(state)) {
+        const auto& metadata = layerFor(state).session->metadata();
         const auto& finest = metadata.levels[static_cast<std::size_t>(
             std::max(0, metadata.finestLevel))];
         visible = snapToCellBoundaries(
@@ -977,6 +1289,19 @@ void MainWindow::beginPanDrag(PlaneViewState& state)
     m_panView = &state;
     m_panSceneDelta = QPointF();
     m_panLastScheduledDelta = QPointF();
+    if (m_pair) {
+        // Over a pair the zoomed window is the panel's, not one raster's: the
+        // drag shifts the framed window and each layer follows within its
+        // own domain (flushPanDrag). Nothing to shift until a layer is zoomed.
+        const auto panel = statesForPanel(state.normal);
+        m_panDataRefresh = std::any_of(panel.begin(), panel.end(),
+            [](const PlaneViewState* other) { return other->visibleRegion.has_value(); });
+        if (m_panDataRefresh) {
+            const auto window = pairCanvasRect(state.normal);
+            m_panStartSceneWindow = QRectF(window.x, window.y, window.width, window.height);
+        }
+        return;
+    }
     // A virtual canvas pans by scrolling (which fetches on its own); the
     // region-shifting refresh is for classic rasters of a zoomed subregion.
     m_panDataRefresh = state.visibleRegion.has_value()
@@ -1029,10 +1354,21 @@ void MainWindow::endPanDrag(PlaneViewState& state, const QPointF& totalSceneDelt
 
 void MainWindow::flushPanDrag(bool finalize)
 {
-    if (!m_panView || !m_panDataRefresh || !m_dataset) {
+    if (!m_panView || !m_panDataRefresh || !primary().session) {
         return;
     }
     if (!finalize && m_panSceneDelta == m_panLastScheduledDelta) {
+        return;
+    }
+    if (m_pair) {
+        // The window moves against the drag -- the content by the delta, as
+        // shiftedPanRegion has it -- and stays inside the whole canvas by
+        // translation, so a layer that runs out of domain while the other
+        // does not still gets the right part of the shifted window.
+        m_panLastScheduledDelta = m_panSceneDelta;
+        applyPairZoomWindow(m_panView->normal,
+            shiftedPairWindow(m_panView->normal, m_panStartSceneWindow, m_panSceneDelta),
+            /*refit=*/false);
         return;
     }
     const auto region = shiftedPanRegion(*m_panView, m_panStartRegion,
@@ -1069,11 +1405,11 @@ std::array<double, 2> MainWindow::viewCenterInData(
     // three now agree on where the view is looking.
     const auto scene = state.view->mapToScene(
         state.view->viewport()->rect()).boundingRect().center();
-    if (state.view->virtualCanvasActive() && m_dataset
-        && !m_dataset->metadata().levels.empty()) {
+    if (state.view->virtualCanvasActive() && layerFor(state).session
+        && !layerFor(state).session->metadata().levels.empty()) {
         // Virtual canvas: scene units are finest cells over the whole domain,
         // counted from the domain's physical top-left.
-        const auto& metadata = m_dataset->metadata();
+        const auto& metadata = layerFor(state).session->metadata();
         const auto domain = datasetSampleBounds(metadata);
         const auto& finest = metadata.levels[static_cast<std::size_t>(
             std::max(0, metadata.finestLevel))];
@@ -1097,9 +1433,9 @@ std::array<double, 2> MainWindow::viewCenterInData(
 
 bool MainWindow::remoteDemandCanvas(const PlaneViewState& state) const
 {
-    return m_dataset != nullptr
-        && std::dynamic_pointer_cast<remote::RemoteDatasetSession>(m_dataset)
-            != nullptr
+    // Never over a pair: its tiles sit on the pair's canvas, which a virtual
+    // canvas would displace (see applyFixedScale).
+    return layerIsRemote(state) && !m_pair
         && !displayIsSpherical() && state.view != nullptr
         && state.view->virtualCanvasActive();
 }
@@ -1107,10 +1443,10 @@ bool MainWindow::remoteDemandCanvas(const PlaneViewState& state) const
 std::optional<ImageView::VirtualPlacement> MainWindow::virtualPlacementFor(
     const PlaneViewState& state, const RealBox& region) const
 {
-    if (!m_dataset || m_dataset->metadata().levels.empty()) {
+    if (!layerFor(state).session || layerFor(state).session->metadata().levels.empty()) {
         return std::nullopt;
     }
-    const auto& metadata = m_dataset->metadata();
+    const auto& metadata = layerFor(state).session->metadata();
     const auto domain = datasetSampleBounds(metadata);
     const auto& finest = metadata.levels[static_cast<std::size_t>(
         std::max(0, metadata.finestLevel))];
@@ -1140,11 +1476,11 @@ std::optional<ImageView::VirtualPlacement> MainWindow::virtualPlacementFor(
 void MainWindow::centerViewOnData(
     PlaneViewState& state, const std::array<double, 2>& dataCenter)
 {
-    if (!m_dataset || m_dataset->metadata().levels.empty()
+    if (!layerFor(state).session || layerFor(state).session->metadata().levels.empty()
         || !state.view->virtualCanvasActive()) {
         return;
     }
-    const auto& metadata = m_dataset->metadata();
+    const auto& metadata = layerFor(state).session->metadata();
     const auto domain = datasetSampleBounds(metadata);
     const auto& finest = metadata.levels[static_cast<std::size_t>(
         std::max(0, metadata.finestLevel))];
@@ -1169,11 +1505,10 @@ void MainWindow::applyFixedScale(int factor)
     for (const auto* state : views) {
         centers.push_back(viewCenterInData(*state));
     }
-    const bool demandDriven = std::dynamic_pointer_cast<
-            remote::RemoteDatasetSession>(m_dataset) != nullptr
-        && !displayIsSpherical();
     for (std::size_t index = 0; index < views.size(); ++index) {
         auto& state = *views[index];
+        const bool demandDriven
+            = layerIsRemote(state) && !displayIsSpherical() && !m_pair;
         if (demandDriven) {
             // Host the raster on a whole-domain virtual canvas so the scroll
             // bars span the domain exactly as they do for a local fixed
@@ -1181,7 +1516,10 @@ void MainWindow::applyFixedScale(int factor)
             // fetch (see updateRemoteFixedScaleDemand).
             state.view->setVirtualCanvas(virtualPlacementFor(
                 state, state.plane->physicalRegion));
-        } else {
+        } else if (!m_pair) {
+            // With a companion the tiles sit on the pair's canvas, which the
+            // fixed scale reads as scene units; resetting the placement
+            // would snap the primary back to the origin.
             state.view->setVirtualCanvas(std::nullopt);
         }
         state.view->setFixedScale(factor);
@@ -1197,7 +1535,7 @@ void MainWindow::updateRemoteFixedScaleDemand(PlaneViewState& state)
     if (!remoteDemandCanvas(state) || state.view->viewport() == nullptr) {
         return;
     }
-    const auto& metadata = m_dataset->metadata();
+    const auto& metadata = layerFor(state).session->metadata();
     if (metadata.levels.empty()) {
         return;
     }
@@ -1261,12 +1599,31 @@ void MainWindow::applyPanStep(PlaneViewState& state, const QPointF& direction)
         return;
     }
     setActiveView(state);
+    if (m_pair) {
+        const auto panel = statesForPanel(state.normal);
+        if (std::any_of(panel.begin(), panel.end(), [](const PlaneViewState* other) {
+                return other->visibleRegion.has_value();
+            })) {
+            // A twentieth of the framed window, at least one scene unit (the
+            // tightest raster pixel), the analogue of the pixel floor below.
+            const auto canvas = pairCanvasRect(state.normal);
+            const QRectF window(canvas.x, canvas.y, canvas.width, canvas.height);
+            const QPointF sceneDelta(
+                direction.x() * std::max(1.0, window.width() * 0.05),
+                direction.y() * std::max(1.0, window.height() * 0.05));
+            applyPairZoomWindow(state.normal,
+                shiftedPairWindow(state.normal, window, sceneDelta), /*refit=*/false);
+            refreshScaleReport();
+            return;
+        }
+        // Not zoomed: the view pans as one dataset's does below.
+    }
     const auto stepX = std::max(1.0, static_cast<double>(state.plane->width) * 0.05);
     const auto stepY = std::max(1.0, static_cast<double>(state.plane->height) * 0.05);
     const QPointF sceneDelta(direction.x() * stepX, direction.y() * stepY);
 
-    if (state.visibleRegion.has_value() && m_dataset
-        && !state.view->virtualCanvasActive()) {
+    if (state.visibleRegion.has_value() && layerFor(state).session
+        && !state.view->virtualCanvasActive() && !m_pair) {
         const auto region = shiftedPanRegion(state, *state.visibleRegion,
             state.plane->width, state.plane->height, sceneDelta);
         if (!region.has_value()) {
@@ -1274,7 +1631,7 @@ void MainWindow::applyPanStep(PlaneViewState& state, const QPointF& direction)
         }
         state.visibleRegion = *region;
         const bool remoteFixed = std::dynamic_pointer_cast<
-            remote::RemoteDatasetSession>(m_dataset) != nullptr
+            remote::RemoteDatasetSession>(layerFor(state).session) != nullptr
             && state.view->transformMode()
                 == ImageView::TransformMode::FixedScale;
         if (!remoteFixed) {
@@ -1299,18 +1656,61 @@ void MainWindow::applyPanStep(PlaneViewState& state, const QPointF& direction)
         static_cast<int>(std::round(sceneDelta.y() * transform.m22()))));
 }
 
+QRectF MainWindow::shiftedPairWindow(
+    int normal, const QRectF& window, const QPointF& sceneDelta) const
+{
+    auto shifted = window.translated(-sceneDelta);
+    // Stopped at the edge of the domains the shifted window would cover, its
+    // size kept: entering a narrower layer's band moves it inside that
+    // layer's edge rather than leaving a part to be cut off.
+    const auto& layout = pairLayout(normal);
+    const SceneRect rect{shifted.x(), shifted.y(), shifted.width(), shifted.height()};
+    std::optional<QRectF> covered;
+    for (std::size_t layer = 0; layer < 2; ++layer) {
+        if (!m_layers[layer].session
+            || !stateShown(m_layers[layer].planeViews[static_cast<std::size_t>(normal)])
+            || !layout.regionForSceneRect(layer, rect)) {
+            continue;
+        }
+        const auto tile = layout.tileRect(layer);
+        const QRectF tileRect(tile.x, tile.y, tile.width, tile.height);
+        covered = covered ? covered->united(tileRect) : tileRect;
+    }
+    const auto whole = layout.canvasRect();
+    const QRectF canvas(whole.x, whole.y, whole.width, whole.height);
+    // Along the stacking axis the bands are contiguous, so a window in one
+    // may cross the interface into the other; along a shared axis it stops
+    // at the covered layers' edge.
+    const auto axes = layout.axes();
+    const auto horizontal = axes[0] == m_pair->perpendicularAxis || !covered
+        ? canvas : *covered;
+    const auto vertical = axes[1] == m_pair->perpendicularAxis || !covered
+        ? canvas : *covered;
+    if (shifted.left() < horizontal.left()) {
+        shifted.moveLeft(horizontal.left());
+    } else if (shifted.right() > horizontal.right()) {
+        shifted.moveRight(horizontal.right());
+    }
+    if (shifted.top() < vertical.top()) {
+        shifted.moveTop(vertical.top());
+    } else if (shifted.bottom() > vertical.bottom()) {
+        shifted.moveBottom(vertical.bottom());
+    }
+    return shifted;
+}
+
 std::optional<RealBox> MainWindow::shiftedPanRegion(
     const PlaneViewState& state, const RealBox& baseRegion,
     int planeWidth, int planeHeight, const QPointF& sceneDelta) const
 {
-    if (!m_dataset || planeWidth <= 0 || planeHeight <= 0) {
+    if (!layerFor(state).session || planeWidth <= 0 || planeHeight <= 0) {
         return std::nullopt;
     }
     auto visible = baseRegion;
     const auto axes = displayAxes(state.normal);
     const auto xAxis = static_cast<std::size_t>(axes[0]);
     const auto yAxis = static_cast<std::size_t>(axes[1]);
-    const auto domain = datasetSampleBounds(m_dataset->metadata());
+    const auto domain = datasetSampleBounds(layerFor(state).session->metadata());
     const auto width = static_cast<double>(planeWidth);
     const auto height = static_cast<double>(planeHeight);
     const auto xExtent = visible.upper[xAxis] - visible.lower[xAxis];
@@ -1344,7 +1744,7 @@ std::optional<RealBox> MainWindow::shiftedPanRegion(
     // cell (arrow-key steps of 0.05*N cells hit exactly x.5 within a few
     // presses), and the floor in physicalToIndex then rounds either way —
     // the duplicated/skipped rows and columns this prevents.
-    const auto& metadata = m_dataset->metadata();
+    const auto& metadata = layerFor(state).session->metadata();
     const auto& finest = metadata.levels[static_cast<std::size_t>(
         std::max(0, metadata.finestLevel))];
     const auto snapped = snapToNearestCellGrid(
@@ -1360,21 +1760,29 @@ void MainWindow::linePlotRequested(PlaneViewState& state, int imageX, int imageY
 {
     setActiveView(state);
     const auto& plane = *state.plane;
-    if (!m_controlsReady || !m_dataset || plane.width <= 0 || plane.height <= 0) {
+    if (!m_controlsReady || !layerFor(state).session || plane.width <= 0 || plane.height <= 0) {
         // The drag that got here already painted a guide; a request that never
         // starts still has to take it down.
         state.view->clearLineGuide();
         return;
     }
-    const auto dataset = m_dataset;
+    const auto dataset = layerFor(state).session;
     const auto& metadata = dataset->metadata();
     const auto horizontal = button == Qt::MiddleButton;
-    const auto level = m_levelSelector->currentData().toInt();
+    const auto level = layerFor(state).levelSelector->currentData().toInt();
     const auto [composition, maximumLevel] = decodeLevelData(
         level, metadata.finestLevel);
-    const auto field = m_fieldSelector->currentData().toUInt();
-    const auto slicePosition = metadata.dimension == 3
+    const auto field = layerFor(state).fieldSelector->currentData().toUInt();
+    auto slicePosition = metadata.dimension == 3
         ? m_slicePosition3d[static_cast<std::size_t>(state.normal)] : 0.0;
+    if (m_pair && metadata.dimension == 3) {
+        // The raster under the pointer was cut at the shared position clamped
+        // into this layer's domain (see requestSlice); the line follows it.
+        const auto bounds = datasetSampleBounds(metadata);
+        const auto axis = static_cast<std::size_t>(state.normal);
+        slicePosition = std::clamp(slicePosition, bounds.lower[axis],
+            std::nextafter(bounds.upper[axis], bounds.lower[axis]));
+    }
     LineRequest request;
     if (displayIsSpherical()) {
         // Logical r-theta / theta-r layout: the click is in the possibly
@@ -1405,8 +1813,8 @@ void MainWindow::linePlotRequested(PlaneViewState& state, int imageX, int imageY
             metadata.dimension, state.normal, slicePosition,
             dataset->id(), FieldId{field}, maximumLevel, composition);
     }
-    const auto outputWidth = horizontal ? state.view->image().width()
-                                        : state.view->image().height();
+    const auto outputWidth = horizontal ? state.view->image(state.tile).width()
+                                        : state.view->image(state.tile).height();
     const auto fieldName = metadata.fields[field].name;
     const auto dimension = metadata.dimension;
     // The other in-plane axis carries the cursor's fixed coordinate.
@@ -1493,7 +1901,7 @@ void MainWindow::sliceMoveRequested(PlaneViewState& state, int imageX, int image
     Qt::MouseButton /*button*/)
 {
     setActiveView(state);
-    if (!m_dataset || m_dataset->metadata().dimension != 3
+    if (!layerFor(state).session || layerFor(state).session->metadata().dimension != 3
         || state.plane->width <= 0 || state.plane->height <= 0) {
         return;
     }
@@ -1521,7 +1929,7 @@ void MainWindow::appendLinePlotCurve(const LineResult& line,
     int maximumLevel, CompositionPolicy composition)
 {
     if (m_linePlotWindow == nullptr) {
-        auto name = QString::fromStdString(m_datasetPath.filename().string());
+        auto name = datasetDisplayName(m_datasetPath);
         if (name.isEmpty()) {
             name = QString::fromStdString(m_datasetPath.string());
         }
@@ -1589,6 +1997,16 @@ void MainWindow::closeEvent(QCloseEvent* event)
     if (m_numberFormatDialog != nullptr) {
         auto* dialog = m_numberFormatDialog;
         m_numberFormatDialog = nullptr;
+        dialog->close();
+    }
+    if (m_lengthUnitsDialog != nullptr) {
+        auto* dialog = m_lengthUnitsDialog;
+        m_lengthUnitsDialog = nullptr;
+        dialog->close();
+    }
+    if (m_axisScalingDialog != nullptr) {
+        auto* dialog = m_axisScalingDialog;
+        m_axisScalingDialog = nullptr;
         dialog->close();
     }
     if (m_userGuideDialog != nullptr) {

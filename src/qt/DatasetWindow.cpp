@@ -14,6 +14,7 @@
 #include <QCloseEvent>
 #include <QColor>
 #include <QFutureWatcher>
+#include <QHeaderView>
 #include <QHBoxLayout>
 #include <QItemSelection>
 #include <QItemSelectionModel>
@@ -21,6 +22,7 @@
 #include <QModelIndex>
 #include <QPalette>
 #include <QPushButton>
+#include <QStyleOptionViewItem>
 #include <QTabWidget>
 #include <QTableView>
 #include <QVariant>
@@ -213,6 +215,9 @@ void DatasetWindow::reload(DatasetRequest request)
 
 void DatasetWindow::setNumberFormat(QString format)
 {
+    if (format == m_numberFormat) {
+        return;
+    }
     m_numberFormat = std::move(format);
     // The loaded values are still on hand; re-rendering the tabs is cheap
     // compared to re-reading the dataset.
@@ -333,12 +338,19 @@ void DatasetWindow::populateTabs()
         const auto& levelData = m_levels[entry];
         const auto& extract = levelData.extract;
 
+        // Each level's own extrema, not the image's display range: this table
+        // shows the numbers in this level, and a User range pinned elsewhere
+        // says nothing about how far apart they are.
+        const auto levelFormat = extract.hasFiniteValues
+            ? resolveNumberFormat(m_numberFormat, extract.minimum, extract.maximum)
+            : m_numberFormat;
+
         auto* page = new QWidget(m_tabs);
         auto* info = new QLabel(page);
         if (extract.hasFiniteValues) {
             info->setText(tr("min=%1 max=%2  (%3 x %4 samples)")
-                .arg(formatNumber(extract.minimum, m_numberFormat))
-                .arg(formatNumber(extract.maximum, m_numberFormat))
+                .arg(formatNumber(extract.minimum, levelFormat))
+                .arg(formatNumber(extract.maximum, levelFormat))
                 .arg(extract.nx)
                 .arg(extract.ny));
         } else {
@@ -364,8 +376,25 @@ void DatasetWindow::populateTabs()
         // up while the user reads the image it marks.
         table->setItemDelegate(new DatasetValueDelegate(table));
         auto* model
-            = new LevelTableModel(extract, m_coloring, m_numberFormat, table);
+            = new LevelTableModel(extract, m_coloring, levelFormat, table);
         table->setModel(model);
+        // Reserve the resolved digits once per level, without asking every
+        // cell for a size hint. The extrema cover fixed notation; scientific
+        // samples also leave room when the extrema themselves round to short
+        // strings. Include the style's cell padding and the grid line.
+        QStyleOptionViewItem cell;
+        cell.initFrom(table);
+        cell.font = table->font();
+        cell.fontMetrics = table->fontMetrics();
+        cell.features = QStyleOptionViewItem::HasDisplay;
+        int columnWidth = table->horizontalHeader()->defaultSectionSize();
+        for (const double value : {extract.minimum, extract.maximum,
+                 -1.2345678901234567e-308, -1.2345678901234567e308}) {
+            cell.text = formatNumber(value, levelFormat);
+            columnWidth = std::max(columnWidth, table->style()->sizeFromContents(
+                QStyle::CT_ItemViewItem, &cell, QSize(), table).width() + 1);
+        }
+        table->horizontalHeader()->setDefaultSectionSize(columnWidth);
         auto* pageLayout = new QVBoxLayout(page);
         pageLayout->addWidget(info);
         pageLayout->addWidget(table, 1);

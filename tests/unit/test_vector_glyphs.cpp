@@ -25,7 +25,7 @@ bool nearlyEqual(float a, float b, float tolerance = 1.0e-5F)
     return std::fabs(a - b) <= tolerance;
 }
 
-amrvis::ScalarPlane makePlane(int width, int height, float value)
+amrvis::ScalarPlane makePlane(int width, int height, double value)
 {
     amrvis::ScalarPlane plane;
     plane.width = width;
@@ -269,6 +269,76 @@ int main()
                     && nearlyEqual(
                         angularShaft.x1 - angularShaft.x0, 0.0F, 1.0e-3F),
                 "pure v_theta at the equator does not point along -Z");
+        }
+    }
+
+    // --- a component whose square overflows a double -----------------------
+    {
+        // 1e200 is an ordinary finite double, but squaring it is not. The
+        // squared-speed scan used to be safe only because the samples had
+        // been narrowed to float, where 1e200 became infinity and the
+        // isfinite guard dropped it; with double samples an infinite maximum
+        // normalized every arrow to zero and emptied the whole overlay.
+        auto u = makePlane(3, 2, 1.0);
+        auto v = makePlane(3, 2, 1.0);
+        require(std::isfinite(1.0e200) && !std::isfinite(1.0e200 * 1.0e200),
+            "the fixture value no longer overflows when squared");
+        u.values[1] = 1.0e200;
+        const auto overflowSegments = amrvis::generateVectorGlyphs(u, v, 3);
+        require(!overflowSegments.empty(),
+            "one huge component emptied the vector overlay");
+        // That sample is the field's maximum, so its own arrow is the one
+        // drawn at full length; the rest are 1e-200 of it and fall under the
+        // relative length cutoff, as they would beside any large outlier.
+        require(overflowSegments.size() == 3,
+            "the overflowing sample did not draw exactly its own arrow");
+        const auto& shaft = overflowSegments.front();
+        require(std::isfinite(shaft.x1) && std::isfinite(shaft.y1)
+                && (shaft.x1 != shaft.x0 || shaft.y1 != shaft.y0),
+            "the surviving arrow is degenerate or non-finite");
+    }
+
+    // Scaling a field must preserve both Cartesian and spherical arrows,
+    // even when a finite vector's magnitude or rotated component overflows.
+    for (const double magnitude : {1.0e200, 1.3e308,
+             std::numeric_limits<double>::max()}) {
+        auto u = makePlane(3, 2, 1.0);
+        auto v = makePlane(3, 2, 0.0);
+        u.values[1] = magnitude;
+        v.values[1] = magnitude;
+        u.values[2] = -magnitude / 2.0;
+        v.values[2] = magnitude / 4.0;
+        u.physicalRegion = amrvis::RealBox{
+            amrvis::Real3{{1.0, 0.0, 0.0}},
+            amrvis::Real3{{2.0, 3.141592653589793, 0.0}}};
+        v.physicalRegion = u.physicalRegion;
+        auto scaledU = u;
+        auto scaledV = v;
+        for (auto& value : scaledU.values) {
+            value /= magnitude;
+        }
+        for (auto& value : scaledV.values) {
+            value /= magnitude;
+        }
+        const auto display = amrvis::sphericalDisplayBounds(u.physicalRegion);
+        for (const bool spherical : {false, true}) {
+            const auto generate = [&](const auto& first, const auto& second) {
+                return spherical
+                    ? amrvis::generateSphericalRZVectorGlyphs(
+                          first, second, 3, display)
+                    : amrvis::generateVectorGlyphs(first, second, 3);
+            };
+            const auto expected = generate(scaledU, scaledV);
+            const auto actual = generate(u, v);
+            require(expected.size() == 6 && actual.size() == expected.size(),
+                "a huge finite vector changed the number of arrows");
+            for (std::size_t index = 0; index < expected.size(); ++index) {
+                const auto& a = actual[index];
+                const auto& e = expected[index];
+                require(nearlyEqual(a.x0, e.x0) && nearlyEqual(a.y0, e.y0)
+                        && nearlyEqual(a.x1, e.x1) && nearlyEqual(a.y1, e.y1),
+                    "a huge finite vector changed arrow geometry");
+            }
         }
     }
 

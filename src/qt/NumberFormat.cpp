@@ -1,6 +1,8 @@
 #include "NumberFormat.hpp"
 
+#include <algorithm>
 #include <clocale>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -120,7 +122,114 @@ QString literalText(const char* data, qsizetype size)
     return QString::fromUtf8(literal);
 }
 
+// The span's precision, or -1 when the author left it out.
+int spanPrecision(const QByteArray& bytes, ConversionSpan span)
+{
+    auto index = span.start;
+    while (index < span.end && bytes[index] != '.') {
+        ++index;
+    }
+    if (index >= span.end) {
+        return -1;
+    }
+    int precision = 0;
+    for (++index; index < span.end && bytes[index] >= '0'
+         && bytes[index] <= '9'; ++index) {
+        precision = std::min(maximumDisplayDigits,
+            precision * 10 + (bytes[index] - '0'));
+    }
+    return precision;
+}
+
+QString splicePrecision(const QString& format, int digits, bool force)
+{
+    if (!isValidNumberFormat(format)) {
+        return format;
+    }
+    const auto bytes = format.toUtf8();
+    const auto span = conversionSpan(bytes);
+    if (span.start < 0) {
+        return format;
+    }
+    const auto conversion = bytes[span.end - 1];
+    if (conversion != 'g' && conversion != 'G') {
+        return format;
+    }
+    const auto existing = spanPrecision(bytes, span);
+    if (existing >= 0 && !force) {
+        return format;
+    }
+    QByteArray result = bytes.left(span.start);
+    // Everything the author wrote except any precision: flags, then width.
+    for (auto index = span.start; index < span.end - 1; ++index) {
+        if (bytes[index] == '.') {
+            break;
+        }
+        result.append(bytes[index]);
+    }
+    result.append('.');
+    result.append(QByteArray::number(std::clamp(digits, 1, maximumDisplayDigits)));
+    result.append(conversion);
+    result.append(bytes.mid(span.end));
+    return QString::fromUtf8(result);
+}
+
 } // namespace
+
+int displayDigits(double minimum, double maximum)
+{
+    if (!std::isfinite(minimum) || !std::isfinite(maximum)) {
+        return minimumDisplayDigits;
+    }
+    const auto span = std::abs(maximum - minimum);
+    const auto scale = std::max(std::abs(minimum), std::abs(maximum));
+    if (!std::isfinite(span) || !(span > 0.0) || !(scale > 0.0)) {
+        return minimumDisplayDigits;
+    }
+    const auto ratio = scale / span;
+    if (!std::isfinite(ratio)) {
+        return maximumDisplayDigits;
+    }
+    const auto needed = std::ceil(std::log10(ratio))
+        + static_cast<double>(displayGuardDigits);
+    if (!(needed > static_cast<double>(minimumDisplayDigits))) {
+        return minimumDisplayDigits;
+    }
+    if (!(needed < static_cast<double>(maximumDisplayDigits))) {
+        return maximumDisplayDigits;
+    }
+    return static_cast<int>(needed);
+}
+
+QString withPrecision(const QString& format, int digits)
+{
+    return splicePrecision(format, digits, false);
+}
+
+QString withForcedPrecision(const QString& format, int digits)
+{
+    return splicePrecision(format, digits, true);
+}
+
+int formatDigits(const QString& format)
+{
+    if (!isValidNumberFormat(format)) {
+        return minimumDisplayDigits;
+    }
+    const auto bytes = format.toUtf8();
+    const auto span = conversionSpan(bytes);
+    if (span.start < 0) {
+        return minimumDisplayDigits;
+    }
+    const auto precision = spanPrecision(bytes, span);
+    return precision >= 0 ? precision : minimumDisplayDigits;
+}
+
+QString resolveNumberFormat(
+    const QString& format, double minimum, double maximum)
+{
+    return withPrecision(format, displayDigits(minimum, maximum));
+}
 
 QString conversionSpecifier(const QString& format)
 {
@@ -153,6 +262,19 @@ QString formatNumber(double value, const QString& format)
     // of the conversion's output and says nothing about the literals around it.
     const QByteArray specifier(bytes.constData() + span.start,
         span.end - span.start);
+    // Oversized width/precision cannot fit the buffer and can make snprintf
+    // do unbounded work even though its destination is small.
+    int run = 0;
+    for (const char character : specifier) {
+        if (character >= '0' && character <= '9') {
+            run = run * 10 + (character - '0');
+            if (run >= 128) {
+                return QString::number(value, 'g', 7);
+            }
+        } else {
+            run = 0;
+        }
+    }
     char buffer[128];
     // The validator guarantees exactly one floating conversion and no other
     // arguments, so a single double is the whole vararg list.

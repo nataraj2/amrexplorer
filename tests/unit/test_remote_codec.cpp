@@ -1,6 +1,7 @@
 #include "Codec.hpp"
 
 #include <array>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -250,6 +251,52 @@ int main()
             && decoded.gridBoxes.front().physicalRegion
                 == slice.gridBoxes.front().physicalRegion,
         "bounded slice response did not round-trip");
+
+    // --- the 1.5 value vectors -------------------------------------------
+    {
+        // Two doubles one float ulp apart cannot both survive the legacy
+        // encoding, which is what makes them the test.
+        constexpr double narrowLow = 1.2566370621199999e-06;
+        constexpr double narrowHigh = 1.25663706213e-06;
+        require(static_cast<float>(narrowLow) == static_cast<float>(narrowHigh),
+            "the fixture pair no longer collapses under the legacy encoding");
+        SliceQueryResult narrow;
+        narrow.plane.width = 2;
+        narrow.plane.height = 1;
+        narrow.plane.physicalRegion = RealBox{
+            Real3{{0.0, 0.0, 0.0}}, Real3{{1.0, 1.0, 0.0}}};
+        narrow.plane.values = {narrowLow, narrowHigh};
+        narrow.plane.valid = {1, 1};
+        narrow.plane.sourceLevel = {0, 0};
+
+        // A current peer: the doubles go in the wide vector and come back
+        // bit for bit.
+        auto current = codec::toWire(narrow, CacheMetrics{});
+        require(current.values.empty() && current.values_f64.size() == 2,
+            "a current peer was not sent the double vector alone");
+        require(codec::fromWire(current).plane.values == narrow.plane.values,
+            "the double vector did not round-trip");
+
+        // A pre-1.5 peer: floats only, and the pair collapses. Lossy by
+        // construction, but consistently so -- pinned here so the legacy path
+        // cannot quietly start sending both vectors or neither.
+        auto legacy = codec::toWire(narrow, CacheMetrics{}, 4);
+        require(legacy.values_f64.empty() && legacy.values.size() == 2,
+            "a pre-1.5 peer was not sent the float vector alone");
+        const auto promoted = codec::fromWire(legacy).plane.values;
+        require(promoted.size() == 2 && promoted[0] == promoted[1],
+            "the legacy float encoding did not collapse the pair");
+        require(promoted[0] == static_cast<double>(static_cast<float>(narrowLow)),
+            "the legacy path did not promote the float it sent");
+
+        // Both populated is ambiguous: which vector wins would decide the
+        // payload's meaning, so it is refused rather than resolved.
+        auto ambiguous = codec::toWire(narrow, CacheMetrics{});
+        ambiguous.values = {1.0F, 2.0F};
+        requireRejected(
+            [&] { static_cast<void>(codec::fromWire(ambiguous)); },
+            "a slice carrying both value vectors was accepted");
+    }
 
     auto wrongIdentifier = bytes;
     wrongIdentifier[4] = 'X';
@@ -623,6 +670,40 @@ int main()
     volume.maximumVoxels = 1 << 20;
     require(codec::fromWire(codec::toWire(volume)) == volume,
         "a volume request with a range did not round-trip");
+    // Protocol 1.6: the isosurface and the volume flag round-trip, the flag
+    // on the wire says when the isosurface fields mean something, and a
+    // non-finite value or opacity is refused.
+    {
+        auto withIsosurface = volume;
+        withIsosurface.isosurface = VolumeIsosurface{FieldId{3}, 1, 0.75, 0x40C0FFU, 0.6F};
+        require(codec::fromWire(codec::toWire(withIsosurface)) == withIsosurface,
+            "a volume request with an isosurface did not round-trip");
+        withIsosurface.showVolume = false;
+        require(codec::fromWire(codec::toWire(withIsosurface)) == withIsosurface,
+            "an isosurface-only request did not round-trip");
+        const auto wire = codec::toWire(withIsosurface);
+        require(wire.has_isosurface && !wire.show_volume && wire.isosurface_field == 3
+                && wire.isosurface_component == 1 && wire.isosurface_value == 0.75
+                && wire.isosurface_color == 0x40C0FFU,
+            "the isosurface fields are not what the wire carries");
+        const auto plain = codec::toWire(volume);
+        require(!plain.has_isosurface && plain.show_volume,
+            "a request without an isosurface set the wire flag");
+        auto bad = wire;
+        bad.isosurface_value = std::numeric_limits<double>::quiet_NaN();
+        requireRejected([&] { static_cast<void>(codec::fromWire(bad)); },
+            "a NaN isosurface value was accepted");
+        bad = wire;
+        bad.isosurface_opacity = std::numeric_limits<float>::infinity();
+        requireRejected([&] { static_cast<void>(codec::fromWire(bad)); },
+            "an infinite isosurface opacity was accepted");
+        // Without the flag the same fields are ignored, as a 1.5 peer's
+        // defaults would be.
+        bad = wire;
+        bad.has_isosurface = false;
+        require(!codec::fromWire(bad).isosurface.has_value(),
+            "isosurface fields without the flag produced an isosurface");
+    }
     // The value on the wire, not just that it survives a round trip. Two
     // transposed mappings are inverses of each other, so every round-trip
     // check in the suite passes while a peer on the other side of a real
@@ -734,5 +815,42 @@ int main()
     frameWire.used_maximum = std::numeric_limits<double>::quiet_NaN();
     requireRejected([&] { static_cast<void>(codec::fromWire(frameWire)); },
         "a NaN used range was accepted");
+
+    // --- narrowToFloat overflows where the conversion does, not sooner ---
+    {
+        // A double above float's largest finite value still rounds down to
+        // it until the midpoint with 2^128; only from there does converting
+        // it overflow. Thresholding at the largest value instead would send
+        // that whole band to infinity, which is not what converting gives.
+        using codec::detail::floatOverflowThreshold;
+        using codec::detail::narrowToFloat;
+        constexpr auto largest = std::numeric_limits<float>::max();
+        constexpr auto largestAsDouble = static_cast<double>(largest);
+        require(largestAsDouble < floatOverflowThreshold,
+            "the overflow threshold is not above FLT_MAX");
+        for (const auto value : {largestAsDouble,
+                 std::nextafter(largestAsDouble, floatOverflowThreshold),
+                 std::nextafter(floatOverflowThreshold, 0.0)}) {
+            require(narrowToFloat(value) == largest,
+                "a double that rounds to FLT_MAX was reported as infinite");
+            require(narrowToFloat(-value) == -largest,
+                "a double that rounds to -FLT_MAX was reported as infinite");
+        }
+        // Through a volatile, not the constant itself: MSVC inlines the helper,
+        // folds the cast in the branch the guard never reaches, and reports
+        // the overflow it would have had as an error (C4756).
+        volatile double threshold = floatOverflowThreshold;
+        require(std::isinf(narrowToFloat(threshold))
+                && narrowToFloat(threshold) > 0.0F,
+            "a double at the overflow threshold was not +infinity");
+        require(std::isinf(narrowToFloat(-threshold))
+                && narrowToFloat(-threshold) < 0.0F,
+            "a double at the negative threshold was not -infinity");
+        require(std::isnan(narrowToFloat(
+                    std::numeric_limits<double>::quiet_NaN())),
+            "a NaN did not survive narrowing");
+        require(narrowToFloat(1.5) == 1.5F && narrowToFloat(0.0) == 0.0F,
+            "an ordinary value did not narrow to itself");
+    }
     return 0;
 }

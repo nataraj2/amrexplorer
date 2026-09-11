@@ -22,6 +22,8 @@ add_executable(amrexplorer_qt
     DiagnosticsModel.hpp
     ExpressionEditorDialog.cpp
     ExpressionEditorDialog.hpp
+    ExportFrame.cpp
+    ExportFrame.hpp
     FabNavigator.cpp
     FabNavigator.hpp
     FabSelectorDock.cpp
@@ -35,6 +37,7 @@ add_executable(amrexplorer_qt
     LinePlotWindow.cpp
     LinePlotWindow.hpp
     MainWindow.cpp
+    MainWindowCompanion.cpp
     MainWindow.hpp
     MainWindowDataset.cpp
     MainWindowInteraction.cpp
@@ -56,6 +59,7 @@ add_executable(amrexplorer_qt
     RemoteOpenDialog.hpp
     RemoteSessionController.cpp
     RemoteSessionController.hpp
+    ScaleBar.hpp
     ScientificDoubleSpinBox.cpp
     ScientificDoubleSpinBox.hpp
     SshConnectArguments.hpp
@@ -66,6 +70,8 @@ add_executable(amrexplorer_qt
     SetContoursDialog.cpp
     SetContoursDialog.hpp
     Theme.hpp
+    ThemeController.cpp
+    ThemeController.hpp
     UserGuideDialog.cpp
     UserGuideDialog.hpp
     VolumeController.cpp
@@ -91,12 +97,14 @@ if(AMREXPLORER_BUILD_TESTS)
         MainWindowTestAccess.cpp
         SmokeHarness.cpp
         SmokeHarness.hpp
+        SmokeHarnessCompanion.cpp
         SmokeHarnessDerived.cpp
         SmokeHarnessFab.cpp
         SmokeHarnessInternal.hpp
         SmokeHarnessLifecycle.cpp
         SmokeHarnessRange.cpp
         SmokeHarnessRemote.cpp
+        SmokeHarnessShortcuts.cpp
         SmokeHarnessSequence.cpp
         SmokeHarnessVolume.cpp
         SmokeHarnessZoom.cpp)

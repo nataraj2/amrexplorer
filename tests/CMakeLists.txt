@@ -474,6 +474,17 @@ target_link_libraries(
 )
 add_test(NAME single_precision_plotfile COMMAND test_single_precision_plotfile)
 
+add_executable(
+    test_near_degenerate_field
+    integration/test_near_degenerate_field.cpp
+)
+target_link_libraries(
+    test_near_degenerate_field
+    PRIVATE amrexplorer::query amrexplorer::data amrexplorer::pipeline
+            amrexplorer::render2d amrexplorer::warnings
+)
+add_test(NAME near_degenerate_field COMMAND test_near_degenerate_field)
+
 add_executable(test_display_transitions integration/test_display_transitions.cpp)
 target_link_libraries(
     test_display_transitions
@@ -666,6 +677,21 @@ if(TARGET amrexplorer_qt)
         COMMAND "${CMAKE_COMMAND}" -E env QT_QPA_PLATFORM=offscreen
             "$<TARGET_FILE:test_dataset_selected_cell>")
 
+    add_executable(test_dataset_column_width
+        unit/test_dataset_column_width.cpp
+        "${PROJECT_SOURCE_DIR}/src/qt/DatasetWindow.cpp"
+        "${PROJECT_SOURCE_DIR}/src/qt/NumberFormat.cpp")
+    set_target_properties(test_dataset_column_width PROPERTIES AUTOMOC ON)
+    target_include_directories(test_dataset_column_width
+        PRIVATE "${PROJECT_SOURCE_DIR}/src/qt")
+    target_link_libraries(test_dataset_column_width PRIVATE
+        amrexplorer::data amrexplorer::pipeline amrexplorer::warnings
+        Qt6::Concurrent Qt6::Test Qt6::Widgets)
+    add_test(NAME dataset_column_width
+        COMMAND "${CMAKE_COMMAND}" -E env QT_QPA_PLATFORM=offscreen
+            "$<TARGET_FILE:test_dataset_column_width>")
+    set_tests_properties(dataset_column_width PROPERTIES TIMEOUT 30)
+
     add_executable(test_palette_controller
         unit/test_palette_controller.cpp
         "${PROJECT_SOURCE_DIR}/src/qt/PaletteController.cpp"
@@ -687,6 +713,32 @@ if(TARGET amrexplorer_qt)
     add_test(NAME palette_controller
         COMMAND "${CMAKE_COMMAND}" -E env QT_QPA_PLATFORM=offscreen
             "$<TARGET_FILE:test_palette_controller>")
+
+    add_executable(test_theme_controller
+        unit/test_theme_controller.cpp
+        "${PROJECT_SOURCE_DIR}/src/qt/ThemeController.cpp"
+        "${PROJECT_SOURCE_DIR}/src/qt/ThemeController.hpp"
+        "${PROJECT_SOURCE_DIR}/src/qt/ExpressionEditorDialog.cpp"
+        "${PROJECT_SOURCE_DIR}/src/qt/ExpressionEditorDialog.hpp"
+        "${PROJECT_SOURCE_DIR}/src/qt/SetContoursDialog.cpp"
+        "${PROJECT_SOURCE_DIR}/src/qt/SetContoursDialog.hpp"
+    )
+    set_target_properties(test_theme_controller PROPERTIES AUTOMOC ON)
+    target_include_directories(test_theme_controller
+        PRIVATE "${PROJECT_SOURCE_DIR}/src/qt")
+    target_link_libraries(test_theme_controller
+        PRIVATE
+            amrexplorer::core
+            amrexplorer::warnings
+            Qt6::Core
+            Qt6::Gui
+            Qt6::Widgets
+    )
+    # Builds a real menu and swaps the application palette, so it needs a QPA
+    # platform; offscreen keeps it headless like the other Qt tests.
+    add_test(NAME theme_controller
+        COMMAND "${CMAKE_COMMAND}" -E env QT_QPA_PLATFORM=offscreen
+            "$<TARGET_FILE:test_theme_controller>")
 
     add_executable(test_range_controller
         unit/test_range_controller.cpp
@@ -760,6 +812,72 @@ if(TARGET amrexplorer_qt)
             "$<TARGET_FILE:test_widget_image_export>")
     set_tests_properties(widget_image_export PROPERTIES TIMEOUT 60)
 
+    add_test(NAME qt_adaptive_precision
+        COMMAND "${CMAKE_COMMAND}"
+            "-DMATERIALIZER=$<TARGET_FILE:fixture_materializer>"
+            "-DAMREXPLORER_QT=$<TARGET_FILE:amrexplorer_qt>"
+            "-DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/data/plotfile_2d"
+            "-DWORK=${CMAKE_CURRENT_BINARY_DIR}/fixtures_adaptive_precision"
+            -DMODE=adaptive-precision
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/qt_smoke_driver.cmake")
+    set_tests_properties(qt_adaptive_precision PROPERTIES TIMEOUT 30)
+
+    add_test(NAME qt_spherical_adaptive_precision
+        COMMAND "${CMAKE_COMMAND}"
+            "-DMATERIALIZER=$<TARGET_FILE:fixture_materializer>"
+            "-DAMREXPLORER_QT=$<TARGET_FILE:amrexplorer_qt>"
+            "-DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/data/plotfile_2d_spherical"
+            "-DWORK=${CMAKE_CURRENT_BINARY_DIR}/fixtures_spherical_adaptive_precision"
+            -DMODE=adaptive-precision
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/qt_smoke_driver.cmake")
+    set_tests_properties(qt_spherical_adaptive_precision PROPERTIES TIMEOUT 30)
+
+    add_executable(test_color_bar_labels unit/test_color_bar_labels.cpp
+        "${PROJECT_SOURCE_DIR}/src/qt/ColorBarWidget.cpp"
+        "${PROJECT_SOURCE_DIR}/src/qt/NumberFormat.cpp")
+    target_include_directories(test_color_bar_labels
+        PRIVATE "${PROJECT_SOURCE_DIR}/src/qt")
+    target_link_libraries(test_color_bar_labels PRIVATE amrexplorer::render2d
+        amrexplorer::warnings Qt6::Widgets)
+    add_test(NAME color_bar_labels COMMAND "${CMAKE_COMMAND}" -E env
+        QT_QPA_PLATFORM=offscreen "$<TARGET_FILE:test_color_bar_labels>")
+
+    add_executable(test_export_frame unit/test_export_frame.cpp
+        "${PROJECT_SOURCE_DIR}/src/qt/ExportFrame.cpp"
+        "${PROJECT_SOURCE_DIR}/src/qt/ColorBarWidget.cpp"
+        "${PROJECT_SOURCE_DIR}/src/qt/NumberFormat.cpp")
+    target_include_directories(test_export_frame PRIVATE "${PROJECT_SOURCE_DIR}/src/qt")
+    target_link_libraries(test_export_frame PRIVATE amrexplorer::render2d
+        amrexplorer::warnings Qt6::Widgets)
+    add_test(NAME export_frame COMMAND "${CMAKE_COMMAND}" -E env
+        QT_QPA_PLATFORM=offscreen "$<TARGET_FILE:test_export_frame>")
+
+    add_executable(test_animation_exporter unit/test_animation_exporter.cpp
+        "${PROJECT_SOURCE_DIR}/src/qt/AnimationExporter.cpp"
+        "${PROJECT_SOURCE_DIR}/src/qt/AnimationExporter.hpp"
+        "${PROJECT_SOURCE_DIR}/src/qt/ExportFrame.cpp"
+        "${PROJECT_SOURCE_DIR}/src/qt/ColorBarWidget.cpp"
+        "${PROJECT_SOURCE_DIR}/src/qt/NumberFormat.cpp")
+    set_target_properties(test_animation_exporter PROPERTIES AUTOMOC ON)
+    target_include_directories(test_animation_exporter PRIVATE "${PROJECT_SOURCE_DIR}/src/qt")
+    target_link_libraries(test_animation_exporter PRIVATE amrexplorer::render2d
+        amrexplorer::warnings Qt6::Widgets Qt6::Concurrent)
+    add_test(NAME animation_exporter COMMAND "${CMAKE_COMMAND}" -E env
+        QT_QPA_PLATFORM=offscreen "$<TARGET_FILE:test_animation_exporter>")
+    set_tests_properties(animation_exporter PROPERTIES TIMEOUT 60)
+
+    foreach(export_fixture plotfile_2d plotfile_3d plotfile_2d_spherical)
+        add_test(NAME qt_export_axes_${export_fixture}
+            COMMAND "${CMAKE_COMMAND}"
+                "-DMATERIALIZER=$<TARGET_FILE:fixture_materializer>"
+                "-DAMREXPLORER_QT=$<TARGET_FILE:amrexplorer_qt>"
+                "-DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/data/${export_fixture}"
+                "-DWORK=${CMAKE_CURRENT_BINARY_DIR}/fixtures_export_axes_${export_fixture}"
+                -DMODE=export-axes
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/qt_smoke_driver.cmake")
+        set_tests_properties(qt_export_axes_${export_fixture} PROPERTIES TIMEOUT 30)
+    endforeach()
+
     add_executable(test_volume_controller
         unit/test_volume_controller.cpp
         "${PROJECT_SOURCE_DIR}/src/qt/VolumeController.cpp"
@@ -768,6 +886,8 @@ if(TARGET amrexplorer_qt)
         "${PROJECT_SOURCE_DIR}/src/qt/VolumeWindow.hpp"
         "${PROJECT_SOURCE_DIR}/src/qt/IsoWidget.cpp"
         "${PROJECT_SOURCE_DIR}/src/qt/OpacityCurveWidget.cpp"
+        "${PROJECT_SOURCE_DIR}/src/qt/ScientificDoubleSpinBox.cpp"
+        "${PROJECT_SOURCE_DIR}/src/qt/NumberFormat.cpp"
         "${PROJECT_SOURCE_DIR}/src/qt/IsoWidget.hpp"
     )
     set_target_properties(test_volume_controller PROPERTIES AUTOMOC ON)
@@ -875,7 +995,8 @@ if(TARGET amrexplorer_qt)
 
     # RemoteSessionController: install() over a loopback Server, start() over
     # the stand-in ssh script running the real server, per-destination
-    # settings, diagnostics lines. Never opens a modal dialog.
+    # settings, diagnostics lines, and a hand-rolled older peer for the
+    # precision notice. Never opens a modal dialog.
     add_executable(test_remote_session_controller
         unit/test_remote_session_controller.cpp
         "${PROJECT_SOURCE_DIR}/src/qt/RemoteSessionController.cpp"
@@ -889,10 +1010,13 @@ if(TARGET amrexplorer_qt)
     set_target_properties(test_remote_session_controller
         PROPERTIES AUTOMOC ON)
     target_include_directories(test_remote_session_controller
-        PRIVATE "${PROJECT_SOURCE_DIR}/src/qt")
+        PRIVATE "${PROJECT_SOURCE_DIR}/src/qt"
+            "${PROJECT_SOURCE_DIR}/src/remote"
+            "${PROJECT_BINARY_DIR}/src/remote/generated")
     target_link_libraries(test_remote_session_controller
         PRIVATE amrexplorer::remote amrexplorer::warnings
-            Qt6::Widgets Qt6::Concurrent)
+            ${AMREXPLORER_FLATBUFFERS_LIBRARY_TARGET}
+            Qt6::Widgets Qt6::Concurrent Threads::Threads)
     add_test(NAME remote_session_controller
         COMMAND "${CMAKE_COMMAND}" -E env QT_QPA_PLATFORM=offscreen
             "$<TARGET_FILE:test_remote_session_controller>"
@@ -1077,6 +1201,128 @@ if(TARGET amrexplorer_qt)
     )
     set_tests_properties(qt_remote_cell_aspect_smoke PROPERTIES TIMEOUT 30)
 
+    # View > Aspect Ratio on the same 64:1 cells: Physical Size stretches the
+    # view by the cell aspect and leaves the raster at the cell aspect; the
+    # scale bar follows the on-screen isotropy; a fixed scale is stated along
+    # the less stretched axis.
+    add_test(
+        NAME qt_physical_aspect_smoke
+        COMMAND "${CMAKE_COMMAND}"
+            "-DMATERIALIZER=$<TARGET_FILE:fixture_materializer>"
+            "-DAMREXPLORER_QT=$<TARGET_FILE:amrexplorer_qt>"
+            "-DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/data/plotfile_2d_tall"
+            "-DWORK=${CMAKE_CURRENT_BINARY_DIR}/fixtures_physical_aspect"
+            -DMODE=physical-aspect
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/qt_smoke_driver.cmake"
+    )
+    set_tests_properties(qt_physical_aspect_smoke PROPERTIES TIMEOUT 30)
+
+    # In Physical Size a fixed scale is the same pixels per length on every
+    # 3-D panel: x is as wide on the XY panel as on the XZ panel beside it.
+    add_test(
+        NAME qt_physical_fixed_scale_smoke
+        COMMAND "${CMAKE_COMMAND}"
+            "-DMATERIALIZER=$<TARGET_FILE:fixture_materializer>"
+            "-DAMREXPLORER_QT=$<TARGET_FILE:amrexplorer_qt>"
+            "-DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/data/plotfile_3d_pair_lower"
+            "-DWORK=${CMAKE_CURRENT_BINARY_DIR}/fixtures_physical_fixed_scale"
+            -DMODE=physical-fixed-scale
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/qt_smoke_driver.cmake"
+    )
+    set_tests_properties(qt_physical_fixed_scale_smoke PROPERTIES TIMEOUT 30)
+
+    # A remote Fit raster sized for the viewport must be re-fetched at native
+    # width when a stretch puts its few columns across the whole viewport.
+    add_test(
+        NAME qt_remote_physical_aspect_smoke
+        COMMAND "${CMAKE_COMMAND}"
+            "-DMATERIALIZER=$<TARGET_FILE:fixture_materializer>"
+            "-DAMREXPLORER_QT=$<TARGET_FILE:amrexplorer_qt>"
+            "-DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/data/plotfile_2d_tall"
+            "-DWORK=${CMAKE_CURRENT_BINARY_DIR}/fixtures_remote_physical_aspect"
+            -DMODE=remote-physical-aspect
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/qt_smoke_driver.cmake"
+    )
+    set_tests_properties(qt_remote_physical_aspect_smoke PROPERTIES TIMEOUT 30)
+
+    # Two plotfiles in one window: an atmosphere over an ocean touching at
+    # z = 0 (tests/data/plotfile_3d_pair_*). Tiles stack at their physical
+    # positions, the XY panel follows the slice position across the
+    # interface, each layer keeps its own field, and closing restores one.
+    add_test(
+        NAME qt_companion_smoke
+        COMMAND "${CMAKE_COMMAND}"
+            "-DMATERIALIZER=$<TARGET_FILE:fixture_materializer>"
+            "-DAMREXPLORER_QT=$<TARGET_FILE:amrexplorer_qt>"
+            "-DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/data/plotfile_3d_pair_upper"
+            "-DSOURCE2=${CMAKE_CURRENT_SOURCE_DIR}/data/plotfile_3d_pair_lower"
+            "-DWORK=${CMAKE_CURRENT_BINARY_DIR}/fixtures_companion"
+            -DMODE=companion
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/qt_smoke_driver.cmake"
+    )
+    set_tests_properties(qt_companion_smoke PROPERTIES TIMEOUT 30)
+
+    # The same pair over the in-process loopback server: a remote primary
+    # takes a companion from its own server, a local path is refused.
+    add_test(
+        NAME qt_remote_companion_smoke
+        COMMAND "${CMAKE_COMMAND}"
+            "-DMATERIALIZER=$<TARGET_FILE:fixture_materializer>"
+            "-DAMREXPLORER_QT=$<TARGET_FILE:amrexplorer_qt>"
+            "-DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/data/plotfile_3d_pair_upper"
+            "-DSOURCE2=${CMAKE_CURRENT_SOURCE_DIR}/data/plotfile_3d_pair_lower"
+            "-DWORK=${CMAKE_CURRENT_BINARY_DIR}/fixtures_remote_companion"
+            -DMODE=remote-companion
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/qt_smoke_driver.cmake"
+    )
+    set_tests_properties(qt_remote_companion_smoke PROPERTIES TIMEOUT 60)
+
+    # Derived fields over a pair: the list reaches the companion, each layer
+    # greys what it cannot resolve, Apply reloads both, the companion keeps
+    # its field by name, and an unchanged list reloads nothing.
+    add_test(
+        NAME qt_companion_derived_field_smoke
+        COMMAND "${CMAKE_COMMAND}"
+            "-DMATERIALIZER=$<TARGET_FILE:fixture_materializer>"
+            "-DAMREXPLORER_QT=$<TARGET_FILE:amrexplorer_qt>"
+            "-DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/data/plotfile_3d_pair_upper"
+            "-DSOURCE2=${CMAKE_CURRENT_SOURCE_DIR}/data/plotfile_3d_pair_lower"
+            "-DWORK=${CMAKE_CURRENT_BINARY_DIR}/fixtures_companion_derived"
+            -DMODE=companion-derived
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/qt_smoke_driver.cmake"
+    )
+    set_tests_properties(qt_companion_derived_field_smoke PROPERTIES TIMEOUT 60)
+
+    # Real zoom over a pair: a selection straddling the interface re-slices
+    # each layer within its own domain, the panel frames it, Reset restores.
+    add_test(
+        NAME qt_companion_zoom_smoke
+        COMMAND "${CMAKE_COMMAND}"
+            "-DMATERIALIZER=$<TARGET_FILE:fixture_materializer>"
+            "-DAMREXPLORER_QT=$<TARGET_FILE:amrexplorer_qt>"
+            "-DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/data/plotfile_3d_pair_upper"
+            "-DSOURCE2=${CMAKE_CURRENT_SOURCE_DIR}/data/plotfile_3d_pair_lower"
+            "-DWORK=${CMAKE_CURRENT_BINARY_DIR}/fixtures_companion_zoom"
+            -DMODE=companion-zoom
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/qt_smoke_driver.cmake"
+    )
+    set_tests_properties(qt_companion_zoom_smoke PROPERTIES TIMEOUT 60)
+
+    # The mixed pairs over the loopback server: a remote companion beside a
+    # local primary, then a local companion beside a remote primary.
+    add_test(
+        NAME qt_mixed_companion_smoke
+        COMMAND "${CMAKE_COMMAND}"
+            "-DMATERIALIZER=$<TARGET_FILE:fixture_materializer>"
+            "-DAMREXPLORER_QT=$<TARGET_FILE:amrexplorer_qt>"
+            "-DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/data/plotfile_3d_pair_upper"
+            "-DSOURCE2=${CMAKE_CURRENT_SOURCE_DIR}/data/plotfile_3d_pair_lower"
+            "-DWORK=${CMAKE_CURRENT_BINARY_DIR}/fixtures_mixed_companion"
+            -DMODE=mixed-companion
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/qt_smoke_driver.cmake"
+    )
+    set_tests_properties(qt_mixed_companion_smoke PROPERTIES TIMEOUT 60)
+
     add_test(
         NAME qt_remote_rubber_aspect_smoke
         COMMAND "${CMAKE_COMMAND}" -E env QT_QPA_PLATFORM=offscreen
@@ -1170,6 +1416,24 @@ if(TARGET amrexplorer_qt)
         PRIVATE amrexplorer::core amrexplorer::warnings Qt6::Core
     )
     add_test(NAME plane_mapping COMMAND test_plane_mapping)
+
+    add_executable(test_aspect_mode unit/test_aspect_mode.cpp)
+    target_include_directories(test_aspect_mode
+        PRIVATE "${PROJECT_SOURCE_DIR}/src/qt"
+    )
+    target_link_libraries(test_aspect_mode
+        PRIVATE amrexplorer::core amrexplorer::warnings
+    )
+    add_test(NAME aspect_mode COMMAND test_aspect_mode)
+
+    add_executable(test_pair_geometry unit/test_pair_geometry.cpp)
+    target_include_directories(test_pair_geometry
+        PRIVATE "${PROJECT_SOURCE_DIR}/src/qt"
+    )
+    target_link_libraries(test_pair_geometry
+        PRIVATE amrexplorer::core amrexplorer::warnings
+    )
+    add_test(NAME pair_geometry COMMAND test_pair_geometry)
 
     add_executable(test_scientific_double_spin_box
         unit/test_scientific_double_spin_box.cpp
@@ -1336,6 +1600,8 @@ if(TARGET amrexplorer_qt)
     # The Volume Rendering window over the 3-D fixture, locally: opened as the
     # View menu action opens it, its first frame must have lit pixels (the
     # ray caster ran end to end through the session, pipeline and window).
+    # Then again with an isosurface alone and the volume hidden, set through
+    # the window's own controls, so the lit pixels are the surface's.
     add_test(
         NAME qt_volume_smoke_3d
         COMMAND "${CMAKE_COMMAND}"
@@ -1820,6 +2086,19 @@ if(TARGET amrexplorer_qt)
             -P "${CMAKE_CURRENT_SOURCE_DIR}/qt_smoke_driver.cmake"
     )
     set_tests_properties(qt_spherical_scale_report_smoke PROPERTIES TIMEOUT 30)
+    # Check sibling mnemonics at every menu depth and window-wide shortcuts,
+    # before opening data and after the dynamic menus have been populated.
+    add_test(
+        NAME qt_menu_shortcuts_smoke
+        COMMAND "${CMAKE_COMMAND}"
+            "-DMATERIALIZER=$<TARGET_FILE:fixture_materializer>"
+            "-DAMREXPLORER_QT=$<TARGET_FILE:amrexplorer_qt>"
+            "-DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/data/plotfile_2d"
+            "-DWORK=${CMAKE_CURRENT_BINARY_DIR}/fixtures_menu_shortcuts"
+            -DMODE=menu-shortcuts
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/qt_smoke_driver.cmake"
+    )
+    set_tests_properties(qt_menu_shortcuts_smoke PROPERTIES TIMEOUT 30)
     # Controls reachable before any dataset is: an Animation panel opened from
     # the View menu with nothing loaded must not survive the next open holding
     # no controls, and Reset Zoom with no views must still report Fit.

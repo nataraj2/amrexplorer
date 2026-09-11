@@ -1,5 +1,7 @@
 #include <amrexplorer/pipeline/SliceRangeResolver.hpp>
 
+#include <amrexplorer/core/ValueMapping.hpp>
+
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
@@ -22,7 +24,7 @@ bool nearlyEqual(double a, double b, double tolerance = 1.0e-12)
     return std::fabs(a - b) <= tolerance * std::max({1.0, std::fabs(a), std::fabs(b)});
 }
 
-amrvis::ScalarPlane makePlane(std::initializer_list<float> values)
+amrvis::ScalarPlane makePlane(std::initializer_list<double> values)
 {
     amrvis::ScalarPlane plane;
     plane.width = static_cast<int>(values.size());
@@ -218,6 +220,33 @@ int main()
         require(threw, "a non-positive logarithmic range did not throw");
     }
 
+    // --- logarithmicRangeViable --------------------------------------------
+    // The one predicate behind every "keep Log or degrade to linear" decision
+    // -- the slice resolver below, the 3-D shared range, and the arrival
+    // realignment -- so it is pinned once here rather than three times.
+    {
+        require(amrvis::logarithmicRangeViable(1.0, 100.0),
+            "an ordinary positive range was called unviable");
+        require(!amrvis::logarithmicRangeViable(0.0, 10.0),
+            "a range reaching zero was called viable");
+        require(!amrvis::logarithmicRangeViable(-1.0, 2.0),
+            "a range crossing zero was called viable");
+        require(!amrvis::logarithmicRangeViable(5.0, 5.0),
+            "a degenerate range was called viable");
+        require(!amrvis::logarithmicRangeViable(10.0, 9.0),
+            "an inverted range was called viable");
+        require(!amrvis::logarithmicRangeViable(
+                    std::numeric_limits<double>::quiet_NaN(), 10.0),
+            "a NaN bound was called viable");
+        require(!amrvis::logarithmicRangeViable(
+                    1.0, std::numeric_limits<double>::infinity()),
+            "an infinite bound was called viable");
+        // The case positivity cannot see: ordered, positive, same logarithm.
+        require(!amrvis::logarithmicRangeViable(
+                    10.0, std::nextafter(10.0, 11.0)),
+            "bounds sharing a logarithm were called viable");
+    }
+
     // --- resolveDisplayRange ----------------------------------------------
     {
         // A logarithmic request over a non-positive range falls back to
@@ -237,6 +266,37 @@ int main()
         require(log.logarithmic && nearlyEqual(log.minimum, 1.0)
                 && nearlyEqual(log.maximum, 100.0),
             "a positive logarithmic request did not stay logarithmic");
+    }
+    {
+        // Positive and strictly ordered, and still unusable as a log range:
+        // adjacent doubles a decade up are too far apart for the degenerate
+        // padding and too close for log() to separate. Reachable only since
+        // the plane stopped narrowing its samples to float, which used to
+        // collapse the pair and trigger the padding instead.
+        constexpr double low = 10.0;
+        const double high = std::nextafter(10.0, 11.0);
+        require(low < high && std::log(low) == std::log(high),
+            "the fixture pair no longer shares a logarithm");
+        const auto plane = makePlane({low, high});
+
+        bool threw = false;
+        try {
+            (void)amrvis::resolveRange(noDataset, FieldId{0}, 0,
+                CompositionPolicy::FinestAvailable, RangeMode::Visible,
+                std::nullopt, true, plane);
+        } catch (const std::exception&) {
+            threw = true;
+        }
+        require(threw, "a range that collapses under log did not throw");
+
+        // The display path turns that into linear rather than failing the
+        // slice, exactly as it does for a non-positive range.
+        const auto fallback = amrvis::resolveDisplayRange(noDataset,
+            FieldId{0}, 0, CompositionPolicy::FinestAvailable,
+            RangeMode::Visible, std::nullopt, true, plane);
+        require(!fallback.logarithmic && fallback.minimum == low
+                && fallback.maximum == high,
+            "a log-collapsing range did not fall back to linear");
     }
 
     return 0;

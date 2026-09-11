@@ -8,12 +8,39 @@
 #include <cstdint>
 #include <cstring>
 #include <iterator>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
 
 namespace amrvis {
+namespace {
+
+struct EdgeInterpolation {
+    double scale;
+    double start;
+    double difference;
+
+    EdgeInterpolation(double first, double second)
+        : scale(std::max(std::abs(first), std::abs(second))
+                  > std::numeric_limits<double>::max() / 2.0
+              ? 0.5 : 1.0)
+        , start(first * scale)
+        , difference(second * scale - start)
+    {}
+
+    // Called only at a crossing, where the difference is nonzero. Halving
+    // large endpoints before subtracting also bounds the numerator; keeping
+    // ordinary values unscaled preserves subnormal differences. The scale
+    // depends only on this edge so adjacent cells compute identical points.
+    [[nodiscard]] double fraction(double value) const
+    {
+        return (value * scale - start) / difference;
+    }
+};
+
+} // namespace
 
 std::vector<double> contourValues(
     double minimum, double maximum, int count, bool logarithmic)
@@ -24,10 +51,9 @@ std::vector<double> contourValues(
     if (!(minimum < maximum)) {
         throw std::invalid_argument("contour range must have positive extent");
     }
-    if (!std::isfinite(minimum) || !std::isfinite(maximum)
-        || !std::isfinite(maximum - minimum)) {
+    if (!std::isfinite(minimum) || !std::isfinite(maximum)) {
         throw std::invalid_argument(
-            "contour range must be finite with a finite span");
+            "contour range must have finite bounds");
     }
     if (logarithmic && !(minimum > 0.0)) {
         throw std::invalid_argument("logarithmic contour range must be positive");
@@ -35,10 +61,13 @@ std::vector<double> contourValues(
     std::vector<double> values(static_cast<std::size_t>(count));
     const double rangeMinimum = logarithmic ? std::log(minimum) : minimum;
     const double rangeMaximum = logarithmic ? std::log(maximum) : maximum;
-    const double span = rangeMaximum - rangeMinimum;
+    const bool wide = rangeMinimum < 0.0
+        && rangeMaximum > std::numeric_limits<double>::max() + rangeMinimum;
+    const double span = wide ? 0.0 : rangeMaximum - rangeMinimum;
     for (int i = 0; i < count; ++i) {
-        const auto value = rangeMinimum
-            + (0.5 + static_cast<double>(i)) / count * span;
+        const auto fraction = (0.5 + static_cast<double>(i)) / count;
+        const auto value = wide ? std::lerp(rangeMinimum, rangeMaximum, fraction)
+                                : rangeMinimum + fraction * span;
         values[static_cast<std::size_t>(i)] =
             logarithmic ? std::exp(value) : value;
     }
@@ -99,7 +128,10 @@ std::vector<ContourSegment> generateContours(
     }
     const auto scale = std::max(
         std::fabs(dataMinimum), std::fabs(dataMaximum));
-    if (dataMaximum - dataMinimum <= 1.0e-6 * scale) {
+    // A range straddling zero cannot be relatively constant, and subtracting
+    // its endpoints can overflow even though both are finite.
+    if ((dataMinimum >= 0.0 || dataMaximum <= 0.0)
+        && dataMaximum - dataMinimum <= 1.0e-6 * scale) {
         return segments;
     }
     // Process cells in the outer loop so each cell's four corner values are
@@ -129,11 +161,13 @@ std::vector<ContourSegment> generateContours(
             const auto x1 = static_cast<float>(i + 1);
             const auto y0 = static_cast<float>(j);
             const auto y1 = static_cast<float>(j + 1);
-            // Precompute edge-interpolation denominators (inverse).
-            const double invDYl = (tl != bl) ? 1.0 / (tl - bl) : 0.0;
-            const double invDYr = (tr != br) ? 1.0 / (tr - br) : 0.0;
-            const double invDXb = (br != bl) ? 1.0 / (br - bl) : 0.0;
-            const double invDXt = (tr != tl) ? 1.0 / (tr - tl) : 0.0;
+            // Divide by the edge difference only at a crossing, where it is
+            // nonzero. Its reciprocal can overflow for subnormal samples
+            // even though the interpolation fraction lies in [0, 1].
+            const EdgeInterpolation leftEdge(bl, tl);
+            const EdgeInterpolation rightEdge(br, tr);
+            const EdgeInterpolation bottomEdge(bl, br);
+            const EdgeInterpolation topEdge(tl, tr);
             for (double value : finiteValues) {
                 // Half-open edge-crossing test: an edge is crossed when its two
                 // endpoints fall on opposite sides of `value`, classifying a
@@ -162,10 +196,10 @@ std::vector<ContourSegment> generateContours(
                 float xR = x1, yR = y1;
                 float xB = x0, yB = y0;
                 float xT = x1, yT = y1;
-                if (left)   yL = y0 + static_cast<float>((value - bl) * invDYl);
-                if (right)  yR = y0 + static_cast<float>((value - br) * invDYr);
-                if (bottom) xB = x0 + static_cast<float>((value - bl) * invDXb);
-                if (top)    xT = x0 + static_cast<float>((value - tl) * invDXt);
+                if (left)   yL = y0 + static_cast<float>(leftEdge.fraction(value));
+                if (right)  yR = y0 + static_cast<float>(rightEdge.fraction(value));
+                if (bottom) xB = x0 + static_cast<float>(bottomEdge.fraction(value));
+                if (top)    xT = x0 + static_cast<float>(topEdge.fraction(value));
 
                 const auto emit = [&](float ax, float ay, float bx, float by) {
                     // Drop zero-length segments: a contour passing exactly
@@ -180,7 +214,13 @@ std::vector<ContourSegment> generateContours(
                 };
 
                 if (left && right && bottom && top) {
-                    const double center = (bl + br + tl + tr) / 4.0;
+                    // Divide first when the sum could overflow, preserving
+                    // the original arithmetic for ordinary/subnormal fields.
+                    const double center = std::max({std::abs(bl), std::abs(br),
+                                              std::abs(tl), std::abs(tr)})
+                            > std::numeric_limits<double>::max() / 4.0
+                        ? bl / 4.0 + br / 4.0 + tl / 4.0 + tr / 4.0
+                        : (bl + br + tl + tr) / 4.0;
                     if (aboveBl != (center > value)) {
                         emit(xL, yL, xB, yB);
                         emit(xT, yT, xR, yR);

@@ -3,6 +3,7 @@
 #include <amrexplorer/cache/ByteLruCache.hpp>
 #include <amrexplorer/data/LocalDatasetSession.hpp>
 #include <amrexplorer/core/CoordinateSystem.hpp>
+#include <amrexplorer/core/ValueMapping.hpp>
 #include <amrexplorer/pipeline/DisplayCoordinator.hpp>
 #include <amrexplorer/render2d/ScalarRenderer.hpp>
 #include <amrexplorer/render2d/SphericalWarp.hpp>
@@ -70,13 +71,15 @@ std::array<int, 2> viewportBoundedOutputSize(
         viewportSize[1], 1, maxSliceOutputDimension);
     const auto axes = slicePlaneAxes(metadata.dimension, normal);
     // The aspect is the region's extent in finest cells, not in physical
-    // units: the display draws one square pixel per finest cell (that is
-    // what finestNativeOutputSize and the view's logical size use), so a
-    // raster fitted to the physical aspect would be squeezed whenever the
-    // cells are not square -- to a one-pixel strip on a domain whose dy is
-    // a hundred times its dx -- and, for spherical data, radius and angle
-    // do not even share units. Fractional cell edges are kept: a rubber-band
-    // region's exact aspect survives.
+    // units: the raster's unit is one sample per finest cell (that is what
+    // finestNativeOutputSize and the view's logical size use), so a raster
+    // fitted to the physical aspect would be squeezed whenever the cells are
+    // not square -- to a one-pixel strip on a domain whose dy is a hundred
+    // times its dx -- and, for spherical data, radius and angle do not even
+    // share units. Physical proportion is the view's business: it stretches
+    // the raster on screen (ImageView::setDisplayStretch) and enlarges the
+    // bound it hands in here along the axis it stretches less. Fractional
+    // cell edges are kept: a rubber-band region's exact aspect survives.
     const auto& finest = metadata.levels[static_cast<std::size_t>(
         std::max(0, metadata.finestLevel))];
     const auto extentX = (region.upper[static_cast<std::size_t>(axes[0])]
@@ -739,14 +742,15 @@ InitialSliceResult executeSessionFrameLoad(
                 const auto [globalMin, globalMax] = shared.value_or(
                     spec.logarithmic ? std::pair{1.0, 10.0}
                                      : std::pair{0.0, 1.0});
-                // One log flag for all three panels: log only when the shared
-                // minimum is positive, matching how a single panel degrades to
+                // One log flag for all three panels, and only where the
+                // mapping exists, matching how a single panel degrades to
                 // linear. A per-panel flag kept an all-positive plane
                 // logarithmic against a union that crosses zero, and
-                // renderScalarPlane rejects a non-positive log minimum -- which
+                // renderScalarPlane rejects any range it cannot map -- which
                 // failed the whole frame load
                 // (see shared-log-range-render-throw-fails-load).
-                const bool sharedLog = spec.logarithmic && globalMin > 0.0;
+                const bool sharedLog = spec.logarithmic
+                    && logarithmicRangeViable(globalMin, globalMax);
                 for (auto& d : result.displays) {
                     d.minimum = globalMin;
                     d.maximum = globalMax;

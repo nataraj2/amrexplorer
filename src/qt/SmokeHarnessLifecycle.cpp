@@ -4,9 +4,12 @@
 
 #include <QAction>
 #include <QComboBox>
+#include <QDir>
+#include <QFileInfo>
 #include <QKeySequence>
 #include <QRunnable>
 #include <QThreadPool>
+#include <QTreeWidget>
 #include <QTimer>
 
 #include <atomic>
@@ -37,8 +40,25 @@ Outcome dispatchLifecycle(Context& context)
     if (argc == 3 && std::string_view(argv[1]) == "--smoke-test") {
         const std::filesystem::path path(argv[2]);
         QObject::connect(&window, &amrvis::qt::MainWindow::datasetOpenFinished,
-            &application, [&application](bool success) {
-                application.exit(success ? 0 : 1);
+            &application, [&window, &application](bool success) {
+                if (!success) {
+                    application.exit(1);
+                    return;
+                }
+                // The Dataset Metadata dock is filled before the open is
+                // reported, geometry rows included for a plotfile.
+                auto* metadataTree = window.findChild<QTreeWidget*>(
+                    QStringLiteral("metadataTree"));
+                const bool geometryShown = metadataTree != nullptr
+                    && !metadataTree->findItems(QStringLiteral("Cell size"),
+                        Qt::MatchExactly | Qt::MatchRecursive).isEmpty()
+                    && !metadataTree->findItems(
+                        QStringLiteral("Coordinate system"),
+                        Qt::MatchExactly | Qt::MatchRecursive).isEmpty();
+                if (!geometryShown) {
+                    qCritical("the metadata dock lists no geometry");
+                }
+                application.exit(geometryShown ? 0 : 1);
             });
         QTimer::singleShot(0, &window,
             [&window, path] { window.openDataset(path, true); });
@@ -357,8 +377,70 @@ Outcome dispatchLifecycle(Context& context)
         QTimer::singleShot(15000, &application,
             [&application] { application.exit(1); });
         QTimer::singleShot(0, &window, [&window, path] { window.openDataset(path); });
-    } else if (argc == 4
-        && std::string_view(argv[1]) == "--export-quit-smoke-test") {
+    } else if (argc == 4 && std::string_view(argv[1]) == "--export-axes-smoke-test") {
+        const std::filesystem::path first(argv[2]);
+        const std::filesystem::path second(argv[3]);
+        const QString directory = QString::fromStdString(first.parent_path().string());
+        // Test the actual PNG export, independent of installed encoders.
+        qputenv("PATH", QByteArray());
+        auto started = std::make_shared<bool>(false);
+        QObject::connect(&window, &amrvis::qt::MainWindow::sequenceFrameDisplayed, &application,
+                         [&window, directory, started](int index) {
+                             if (index == 0 && !*started) {
+                                 *started = true;
+                                 window.startAnimationExportForTest(directory + "/axes.png", true,
+                                                                    true, true);
+                             }
+                         });
+        auto* poll = new QTimer(&application);
+        QObject::connect(poll, &QTimer::timeout, &application,
+                         [&window, &application, directory, poll] {
+                             const auto firstFrames =
+                                 QDir(directory).entryList({"axes*_00000.png"}, QDir::Files);
+                             if (firstFrames.isEmpty())
+                                 return;
+                             for (const auto& name : firstFrames) {
+                                 auto nextName = name;
+                                 nextName.replace("_00000.png", "_00001.png");
+                                 if (!QFileInfo::exists(directory + "/" + nextName))
+                                     return;
+                             }
+                             bool valid = firstFrames.size() == 1 || firstFrames.size() == 3;
+                             if (!valid) {
+                                 qWarning("Export produced %lld panels, expected one or three",
+                                          static_cast<long long>(firstFrames.size()));
+                             }
+                             for (const auto& name : firstFrames) {
+                                 auto nextName = name;
+                                 nextName.replace("_00000.png", "_00001.png");
+                                 const QImage firstImage(directory + "/" + name);
+                                 const QImage nextImage(directory + "/" + nextName);
+                                 const bool samePixels = firstImage == nextImage;
+                                 const bool panelValid = !firstImage.isNull() && samePixels &&
+                                                         firstImage.pixelColor(0, 0).alpha() == 0 &&
+                                                         firstImage.dotsPerMeterX() > 0;
+                                 if (!panelValid) {
+                                     qWarning(
+                                         "Export mismatch (%s, Qt %s): sizes %dx%d / %dx%d, "
+                                         "equal=%d, alpha=%d, dpm=%d / %d",
+                                         qPrintable(name), qVersion(), firstImage.width(),
+                                         firstImage.height(), nextImage.width(), nextImage.height(),
+                                         samePixels,
+                                         firstImage.isNull() ? -1
+                                                             : firstImage.pixelColor(0, 0).alpha(),
+                                         firstImage.dotsPerMeterX(), nextImage.dotsPerMeterX());
+                                 }
+                                 valid = valid && panelValid;
+                             }
+                             poll->stop();
+                             window.close();
+                             application.exit(valid ? 0 : 1);
+                         });
+        poll->start(10);
+        QTimer::singleShot(15000, &application, [&application] { application.exit(1); });
+        QTimer::singleShot(0, &window,
+                           [&window, first, second] { window.openSequence({first, second}); });
+    } else if (argc == 4 && std::string_view(argv[1]) == "--export-quit-smoke-test") {
         // Open a two-frame sequence, start an animation export (bypassing the
         // interactive color-bar/save dialogs), and quit the instant FFmpeg
         // encoding begins. With a hung stand-in ffmpeg on PATH the encoder
@@ -386,8 +468,7 @@ Outcome dispatchLifecycle(Context& context)
         QTimer::singleShot(0, &window, [&window, first, second] {
             window.openSequence({first, second});
         });
-    }
-    else {
+    } else {
         return {false, std::nullopt};
     }
     return {true, std::nullopt};

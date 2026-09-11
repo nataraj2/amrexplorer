@@ -1,4 +1,5 @@
 #include <amrexplorer/core/Metadata.hpp>
+#include <amrexplorer/core/ValueMapping.hpp>
 #include <amrexplorer/data/LocalDatasetSession.hpp>
 #include <amrexplorer/data/SessionValidation.hpp>
 
@@ -1204,6 +1205,31 @@ int main()
             requireRejected([&] {
                 validateSessionVolumeRequest(metadata, id, bad);
             }, "a structurally invalid volume request was accepted");
+            // The isosurface's field is checked against the catalog too, and
+            // named as its own so the message says which of the two failed.
+            bad = request;
+            bad.isosurface = VolumeIsosurface{FieldId{0}, 0, 0.5, 0xFFFFFFU, 1.0F};
+            requireAccepted([&] {
+                validateSessionVolumeRequest(metadata, id, bad);
+            }, "a well-formed isosurface was rejected");
+            bad.showVolume = false;
+            requireAccepted([&] {
+                validateSessionVolumeRequest(metadata, id, bad);
+            }, "an isosurface-only request was rejected");
+            bad.isosurface->field = FieldId{3};
+            requireRejectedWith([&] {
+                validateSessionVolumeRequest(metadata, id, bad);
+            }, "isosurface field", "an unknown isosurface field was accepted");
+            bad.isosurface->field = FieldId{0};
+            bad.isosurface->component = 1;
+            requireRejectedWith([&] {
+                validateSessionVolumeRequest(metadata, id, bad);
+            }, "isosurface component", "a missing isosurface component was accepted");
+            bad = request;
+            bad.showVolume = false;
+            requireRejected([&] {
+                validateSessionVolumeRequest(metadata, id, bad);
+            }, "a request rendering nothing was accepted");
         }
 
         VolumeFrame frame;
@@ -1310,7 +1336,7 @@ int main()
 
     // --- the Visible range rule, which the slice path has to agree with ---
     {
-        const auto gridOf = [](std::vector<float> values) {
+        const auto gridOf = [](std::vector<double> values) {
             amrvis::VolumeGrid grid;
             grid.dims = {static_cast<int>(values.size()), 1, 1};
             grid.region.lower = {{0.0, 0.0, 0.0}};
@@ -1349,6 +1375,24 @@ int main()
                 && !amrvis::visibleVolumeRange(gridOf({quietNaN}), false)
                         .logarithmic,
             "an all-NaN grid did not fall back to a neutral range");
+        // Positive and strictly ordered is not enough. Adjacent doubles a
+        // decade up clear both tests and still share a logarithm, which the
+        // raycaster refuses outright -- so this has to reach linear the same
+        // way a mixed-sign range does. Reachable only since the grid stopped
+        // narrowing its voxels to float, which collapsed the pair into the
+        // degenerate padding instead.
+        const double justAboveTen = std::nextafter(10.0, 11.0);
+        require(10.0 < justAboveTen
+                && std::log(10.0) == std::log(justAboveTen),
+            "the fixture pair no longer shares a logarithm");
+        const auto sameLogarithm
+            = amrvis::visibleVolumeRange(gridOf({10.0, justAboveTen}), true);
+        require(!sameLogarithm.logarithmic,
+            "a range whose bounds share a logarithm went logarithmic");
+        require(amrvis::resolveValueRange(sameLogarithm.minimum,
+                    sameLogarithm.maximum, sameLogarithm.logarithmic)
+                    .has_value(),
+            "the fallback range is still unusable by the raycaster");
         // The scan honours the token: it walks the whole grid otherwise.
         amrvis::StopSource stop;
         stop.request_stop();
