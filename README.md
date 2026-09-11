@@ -40,3 +40,18 @@ FAB and MultiFab data.
 
 The User Guide is also bundled in the application under **Help > User
 Guide...** for offline use.
+
+## Installation on Perlmutter
+
+### Installing Qt
+
+```
+pip install --user aqtinstall
+python3 -m aqt install-qt linux desktop 6.6.2 gcc_64 --outputdir $HOME/qt6
+```
+```
+cmake --preset default -DAMREXPLORER_BUILD_TESTS=OFF -DCMAKE_C_COMPILER=$(which gcc) -DCMAKE_CXX_COMPILER=$(which g++) -DCMAKE_PREFIX_PATH=$HOME/qt6/6.6.2/gcc_64
+cmake --build --preset default --parallel 4
+cmake --install build
+```
+This will install `amrexplorer` in `$HOME/local/bin`. By loggin in using `ssh -X` to Perlmutter, `./amrexplorer` will open the GUI.
